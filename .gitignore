@@ -1,0 +1,17 @@
+# Transient cache — downloaded fresh each run
+cache/oi_spurts_*.json
+cache/price_changes_*.json
+
+# Keep these in git (rolling FII history + bhav copy + market caps)
+# cache/fii_dii_*.json       ← tracked
+# cache/bhavcopy_*.json      ← tracked
+# cache/market_cap_*.json    ← tracked
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# macOS
+.DS_Store

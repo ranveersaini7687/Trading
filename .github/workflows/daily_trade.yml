@@ -1,0 +1,43 @@
+name: Auto Trader — Daily Run
+
+on:
+  schedule:
+    # 3:15 PM IST = 09:45 AM UTC, Mon–Fri
+    - cron: '45 9 * * 1-5'
+  workflow_dispatch:   # manual trigger from GitHub UI
+
+permissions:
+  contents: write      # needed to push portfolio + results back to repo
+
+jobs:
+  trade:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run scanner + paper trader
+        run: python3 run_once.py
+
+      - name: Commit updated results
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add paper_portfolio.json scan_results.json trade_log.xlsx cache/
+          git diff --staged --quiet \
+            || git commit -m "bot: daily run $(date -u '+%Y-%m-%d %H:%M UTC')"
+
+      - name: Push results
+        run: git push

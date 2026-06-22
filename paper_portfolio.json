@@ -1,0 +1,52 @@
+{
+  "total_capital": 1000000,
+  "cash": 601727,
+  "positions": {
+    "CIPLA": {
+      "entry_price": 1417,
+      "quantity": 70,
+      "invested": 99190,
+      "entry_date": "2026-06-22",
+      "stop_loss": 1402.83,
+      "target": 1445.34,
+      "pcr": 0.89,
+      "oi_chg": 11.21,
+      "macro_entry": "NEUTRAL"
+    },
+    "BHARATFORG": {
+      "entry_price": 2109,
+      "quantity": 47,
+      "invested": 99123,
+      "entry_date": "2026-06-22",
+      "stop_loss": 2087.91,
+      "target": 2151.18,
+      "pcr": 0.81,
+      "oi_chg": 7.54,
+      "macro_entry": "NEUTRAL"
+    },
+    "ABCAPITAL": {
+      "entry_price": 392,
+      "quantity": 255,
+      "invested": 99960,
+      "entry_date": "2026-06-22",
+      "stop_loss": 388.08,
+      "target": 399.84,
+      "pcr": 0.92,
+      "oi_chg": 6.11,
+      "macro_entry": "NEUTRAL"
+    },
+    "IDFCFIRSTB": {
+      "entry_price": 80,
+      "quantity": 1250,
+      "invested": 100000,
+      "entry_date": "2026-06-22",
+      "stop_loss": 79.2,
+      "target": 81.6,
+      "pcr": 0.98,
+      "oi_chg": 2.76,
+      "macro_entry": "NEUTRAL"
+    }
+  },
+  "closed_trades": [],
+  "created": "2026-06-22T20:58:11.525139"
+}
