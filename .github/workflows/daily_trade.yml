@@ -29,6 +29,10 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run scanner + paper trader
+        env:
+          TWILIO_SID:   ${{ secrets.TWILIO_SID }}
+          TWILIO_TOKEN: ${{ secrets.TWILIO_TOKEN }}
+          WHATSAPP_TO:  ${{ secrets.WHATSAPP_TO }}
         run: python3 run_once.py
 
       - name: Commit updated results
