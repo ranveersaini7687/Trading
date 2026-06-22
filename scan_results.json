@@ -1,5 +1,5 @@
 {
-  "scan_time": "2026-06-22T16:18:42.314689",
+  "scan_time": "2026-06-22T19:19:53.812793",
   "criteria": {
     "min_oi_chg_pct": 2.0,
     "min_pcr": 0.8
@@ -18,53 +18,8 @@
   },
   "summary": {
     "oi_spurt_stocks": 212,
-    "long_buildup": 42,
-    "matched": 4
+    "long_buildup": 0,
+    "matched": 0
   },
-  "results": [
-    {
-      "symbol": "CIPLA",
-      "latest_oi": 81313,
-      "prev_oi": 73117,
-      "oi_chg": 11.21,
-      "spot_price": 1417,
-      "nse_ts": "22-Jun-2026 15:30:22",
-      "price_chg": 4.73,
-      "pcr": 0.89,
-      "market_cap_cr": 114367
-    },
-    {
-      "symbol": "BHARATFORG",
-      "latest_oi": 29538,
-      "prev_oi": 27468,
-      "oi_chg": 7.54,
-      "spot_price": 2109,
-      "nse_ts": "22-Jun-2026 15:30:22",
-      "price_chg": 3.06,
-      "pcr": 0.81,
-      "market_cap_cr": 100580
-    },
-    {
-      "symbol": "ABCAPITAL",
-      "latest_oi": 25511,
-      "prev_oi": 24043,
-      "oi_chg": 6.11,
-      "spot_price": 392,
-      "nse_ts": "22-Jun-2026 15:30:22",
-      "price_chg": 4.27,
-      "pcr": 0.92,
-      "market_cap_cr": 102764
-    },
-    {
-      "symbol": "IDFCFIRSTB",
-      "latest_oi": 71070,
-      "prev_oi": 69159,
-      "oi_chg": 2.76,
-      "spot_price": 80,
-      "nse_ts": "22-Jun-2026 15:30:22",
-      "price_chg": 2.55,
-      "pcr": 0.98,
-      "market_cap_cr": 69500
-    }
-  ]
+  "results": []
 }

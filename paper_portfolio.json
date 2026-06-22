@@ -1,52 +1,56 @@
 {
   "total_capital": 1000000,
-  "cash": 601727,
-  "positions": {
-    "CIPLA": {
+  "cash": 1000514.35,
+  "positions": {},
+  "closed_trades": [
+    {
+      "symbol": "CIPLA",
+      "entry_date": "2026-06-22",
+      "exit_date": "2026-06-22",
       "entry_price": 1417,
+      "exit_price": 1415.7,
       "quantity": 70,
-      "invested": 99190,
-      "entry_date": "2026-06-22",
-      "stop_loss": 1402.83,
-      "target": 1445.34,
-      "pcr": 0.89,
-      "oi_chg": 11.21,
+      "pnl_abs": -91.0,
+      "pnl_pct": -0.09,
+      "reason": "SIGNAL GONE",
       "macro_entry": "NEUTRAL"
     },
-    "BHARATFORG": {
+    {
+      "symbol": "BHARATFORG",
+      "entry_date": "2026-06-22",
+      "exit_date": "2026-06-22",
       "entry_price": 2109,
+      "exit_price": 2103.8,
       "quantity": 47,
-      "invested": 99123,
-      "entry_date": "2026-06-22",
-      "stop_loss": 2087.91,
-      "target": 2151.18,
-      "pcr": 0.81,
-      "oi_chg": 7.54,
+      "pnl_abs": -244.4,
+      "pnl_pct": -0.25,
+      "reason": "SIGNAL GONE",
       "macro_entry": "NEUTRAL"
     },
-    "ABCAPITAL": {
+    {
+      "symbol": "ABCAPITAL",
+      "entry_date": "2026-06-22",
+      "exit_date": "2026-06-22",
       "entry_price": 392,
+      "exit_price": 391.95,
       "quantity": 255,
-      "invested": 99960,
-      "entry_date": "2026-06-22",
-      "stop_loss": 388.08,
-      "target": 399.84,
-      "pcr": 0.92,
-      "oi_chg": 6.11,
+      "pnl_abs": -12.75,
+      "pnl_pct": -0.01,
+      "reason": "SIGNAL GONE",
       "macro_entry": "NEUTRAL"
     },
-    "IDFCFIRSTB": {
-      "entry_price": 80,
-      "quantity": 1250,
-      "invested": 100000,
+    {
+      "symbol": "IDFCFIRSTB",
       "entry_date": "2026-06-22",
-      "stop_loss": 79.2,
-      "target": 81.6,
-      "pcr": 0.98,
-      "oi_chg": 2.76,
+      "exit_date": "2026-06-22",
+      "entry_price": 80,
+      "exit_price": 80.69,
+      "quantity": 1250,
+      "pnl_abs": 862.5,
+      "pnl_pct": 0.86,
+      "reason": "SIGNAL GONE",
       "macro_entry": "NEUTRAL"
     }
-  },
-  "closed_trades": [],
+  ],
   "created": "2026-06-22T20:58:11.525139"
 }
