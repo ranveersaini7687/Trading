@@ -313,11 +313,15 @@ def run():
         log(f"  ✗ CLOSED {sym:<14} Exit ₹{exit_px:.2f}  P&L ₹{sign}{pnl_abs:,.0f} ({sign}{pnl_pct:.2f}%)  [{reason}]")
 
     # ── Step 3: Open new positions ────────────────────────────────────────────
-    already_open = set(portfolio["positions"].keys())
-    new_signals  = [r for r in signals if r["symbol"] not in already_open]
-    slots_free   = MAX_POSITIONS - len(portfolio["positions"])
+    already_open  = set(portfolio["positions"].keys())
+    traded_today  = {t["symbol"] for t in portfolio["closed_trades"] if t["exit_date"] == today}
+    skipped_today = [r["symbol"] for r in signals if r["symbol"] in traded_today]
+    new_signals   = [r for r in signals if r["symbol"] not in already_open and r["symbol"] not in traded_today]
+    slots_free    = MAX_POSITIONS - len(portfolio["positions"])
 
     log(f"\n  Signals: {len(signals)}  |  New: {len(new_signals)}  |  Slots free: {slots_free}  |  Cash: ₹{portfolio['cash']:,.0f}")
+    if skipped_today:
+        log(f"  Skipped (already traded today): {', '.join(skipped_today)}")
 
     if macro == "BEARISH":
         log("  *** MACRO BEARISH — FII aggressively selling. No new entries today. ***")
