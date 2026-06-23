@@ -2,14 +2,16 @@
 """
 Bot Runner — Auto-schedules scanner + paper trader during NSE market hours.
 
-Market hours : 9:15 AM – 3:30 PM IST, Monday–Friday
-Scan interval: every 5 minutes during market hours
+Market hours    : 9:15 AM – 3:30 PM IST, Monday–Friday
+Scan interval   : every 5 minutes during market hours
+Post-market scan: starts at 4:40 PM IST, retries every 5 min until bhav copy fetched
 
 Usage:
   python3 run_bot.py          # runs forever, Ctrl+C to stop
   python3 run_bot.py --once   # single cycle (for cron / testing)
 """
 
+import os
 import sys
 import time
 import traceback
@@ -17,6 +19,7 @@ from datetime import datetime, timedelta
 
 MARKET_OPEN_H,  MARKET_OPEN_M  =  9, 15
 MARKET_CLOSE_H, MARKET_CLOSE_M = 15, 30
+POST_MARKET_H,  POST_MARKET_M  = 16, 40   # bhav copy usually available by 4:30 PM
 SCAN_INTERVAL_SEC = 300   # 5 minutes
 
 
@@ -26,7 +29,7 @@ def log(msg):
 
 def is_market_open():
     now = datetime.now()
-    if now.weekday() >= 5:          # Saturday=5, Sunday=6
+    if now.weekday() >= 5:
         return False
     t = now.hour * 60 + now.minute
     open_t  = MARKET_OPEN_H  * 60 + MARKET_OPEN_M
@@ -34,10 +37,25 @@ def is_market_open():
     return open_t <= t <= close_t
 
 
+def is_post_market_window():
+    """True from 4:40 PM onwards on weekdays (until midnight)."""
+    now = datetime.now()
+    if now.weekday() >= 5:
+        return False
+    t      = now.hour * 60 + now.minute
+    post_t = POST_MARKET_H * 60 + POST_MARKET_M
+    return t >= post_t
+
+
+def bhav_copy_fetched_today():
+    """True if today's bhav copy cache file exists (scan succeeded)."""
+    trade_date = datetime.now().strftime("%Y%m%d")
+    return os.path.exists(os.path.join("cache", f"bhavcopy_{trade_date}.json"))
+
+
 def seconds_until_open():
-    now  = datetime.now()
-    # Next weekday open
-    nxt  = now.replace(hour=MARKET_OPEN_H, minute=MARKET_OPEN_M, second=0, microsecond=0)
+    now = datetime.now()
+    nxt = now.replace(hour=MARKET_OPEN_H, minute=MARKET_OPEN_M, second=0, microsecond=0)
     if nxt <= now:
         nxt += timedelta(days=1)
     while nxt.weekday() >= 5:
@@ -46,7 +64,6 @@ def seconds_until_open():
 
 
 def run_cycle():
-    # Import here so each cycle picks up any code changes without restarting
     import importlib
     import long_buildup_scanner
     import paper_trader
@@ -66,16 +83,22 @@ def run_cycle():
 
 def main():
     once = "--once" in sys.argv
+    post_market_done_date = None   # track which date post-market scan completed
+
     log("=" * 60)
     log("  AUTO TRADER BOT — Starting up")
     log(f"  Market hours : {MARKET_OPEN_H:02d}:{MARKET_OPEN_M:02d} – "
         f"{MARKET_CLOSE_H:02d}:{MARKET_CLOSE_M:02d} IST  Mon–Fri")
+    log(f"  Post-market  : {POST_MARKET_H:02d}:{POST_MARKET_M:02d} IST (bhav copy scan, retries every 5 min)")
     log(f"  Scan interval: every {SCAN_INTERVAL_SEC // 60} minutes")
     log("  Press Ctrl+C to stop")
     log("=" * 60)
 
     while True:
+        today = datetime.now().strftime("%Y-%m-%d")
+
         if is_market_open():
+            # ── Intraday scan every 5 min ──────────────────────────
             try:
                 run_cycle()
             except KeyboardInterrupt:
@@ -92,7 +115,35 @@ def main():
                 f"(~{(datetime.now() + timedelta(seconds=SCAN_INTERVAL_SEC)).strftime('%H:%M')})")
             time.sleep(SCAN_INTERVAL_SEC)
 
+        elif is_post_market_window() and post_market_done_date != today:
+            # ── Post-market bhav copy scan ─────────────────────────
+            if bhav_copy_fetched_today():
+                log("  Post-market: bhav copy already cached — skipping extra scan.")
+                post_market_done_date = today
+                if once:
+                    break
+                for _ in range(60):
+                    time.sleep(10)
+                    if is_market_open():
+                        break
+            else:
+                log(f"  Post-market scan — fetching bhav copy (retry every 5 min)...")
+                try:
+                    run_cycle()
+                    post_market_done_date = today
+                    log("  Post-market scan complete ✓")
+                except KeyboardInterrupt:
+                    raise
+                except Exception:
+                    log("  !! Post-market cycle failed — retrying in 5 min:")
+                    traceback.print_exc()
+
+                if once:
+                    break
+                time.sleep(SCAN_INTERVAL_SEC)
+
         else:
+            # ── Sleep until next event ─────────────────────────────
             now  = datetime.now()
             secs = seconds_until_open()
             h, m = divmod(secs // 60, 60)
@@ -110,10 +161,9 @@ def main():
                 log("  Market closed and --once flag set, exiting.")
                 break
 
-            # Sleep in 10-min chunks so Ctrl+C is responsive
             for _ in range(60):
                 time.sleep(10)
-                if is_market_open():
+                if is_market_open() or (is_post_market_window() and post_market_done_date != today):
                     break
 
 
