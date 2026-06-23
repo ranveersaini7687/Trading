@@ -282,7 +282,9 @@ def run():
             reason = "SL HIT"
         elif curr >= pos["target"]:
             reason = "TARGET HIT"
-        elif sym not in signal_map:
+        elif signals and sym not in signal_map:
+            # Only exit on SIGNAL GONE when scanner actually returned results.
+            # Empty signals means bhav copy unavailable intraday — not a real exit.
             reason = "SIGNAL GONE"
 
         sign   = "+" if pnl_abs >= 0 else ""
