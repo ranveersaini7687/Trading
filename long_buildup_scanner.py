@@ -132,8 +132,6 @@ def init_session():
     time.sleep(2)
     session.get("https://www.nseindia.com/market-data/live-equity-market", timeout=15)
     time.sleep(1)
-    session.get("https://www.nseindia.com/option-chain", timeout=15)
-    time.sleep(1)
     return session
 
 
@@ -213,50 +211,14 @@ def get_price_changes(symbols, trade_date):
     return changes, ltps
 
 
-# ── Step 4: Live option chain — PCR + liquidity (NSE API) ────────────────────
-MIN_ATM_OI = 500   # minimum combined ATM OI to consider a stock liquid
-
-def _fetch_option_chain_pcr(session, symbol):
+# ── Step 4: Live option chain — PCR + liquidity (Angel One NFO) ──────────────
+def get_live_pcr_data(symbols, spot_prices, trade_date):
     """
-    Fetch live option chain for one symbol and return (pcr, is_liquid).
-    Uses near-month expiry, ATM ±15% strikes.
-    """
-    url  = f"https://www.nseindia.com/api/option-chain-equities?symbol={symbol}"
-    resp = session.get(url, timeout=10)
-    resp.raise_for_status()
-    data = resp.json()
-
-    records     = data.get("records", {}).get("data", [])
-    spot        = data.get("records", {}).get("underlyingValue", 0)
-    expiry_list = data.get("records", {}).get("expiryDates", [])
-
-    if not spot or not records or not expiry_list:
-        log(f"  !! option chain empty: spot={spot} records={len(records)} expiries={expiry_list[:2]}")
-        return None, False
-
-    near_expiry = expiry_list[0]
-    lower, upper = spot * 0.85, spot * 1.15
-    ce_oi = pe_oi = 0
-
-    for rec in records:
-        if rec.get("expiryDate") != near_expiry:
-            continue
-        strike = rec.get("strikePrice", 0)
-        if lower <= strike <= upper:
-            ce_oi += rec.get("CE", {}).get("openInterest", 0)
-            pe_oi += rec.get("PE", {}).get("openInterest", 0)
-
-    pcr       = round(pe_oi / ce_oi, 2) if ce_oi > 0 else None
-    is_liquid = (ce_oi + pe_oi) >= MIN_ATM_OI
-    return pcr, is_liquid
-
-
-def get_live_pcr_data(session, symbols, trade_date):
-    """
-    Fetch live PCR + liquidity for each symbol via NSE option chain API.
+    Fetch live PCR + liquidity for each symbol via Angel One NFO option data.
+    spot_prices: {symbol: ltp} — needed to filter ATM ±15% strikes.
     Returns ({symbol: pcr}, {symbol: is_liquid}).
     """
-    log(f"Step 4 — Live option chain PCR for {len(symbols)} stocks (NSE)")
+    log(f"Step 4 — Live option chain PCR for {len(symbols)} stocks (Angel One NFO)")
     key    = f"live_pcr_{trade_date}"
     cached = cache_load(key, ttl_sec=LIVE_TTL_SEC)
     if cached is not None:
@@ -265,15 +227,18 @@ def get_live_pcr_data(session, symbols, trade_date):
 
     pcr_map, liquid_stocks = {}, set()
     for sym in symbols:
+        spot = spot_prices.get(sym) or 0
+        if not spot:
+            log(f"  {sym}: no spot price — skipping PCR")
+            continue
         try:
-            pcr, liquid = _fetch_option_chain_pcr(session, sym)
+            pcr, liquid = angel.get_pcr(sym, spot)
             if pcr is not None:
                 pcr_map[sym] = pcr
             if liquid:
                 liquid_stocks.add(sym)
-            time.sleep(0.3)   # avoid NSE rate limit
         except Exception as e:
-            log(f"  !! {sym}: option chain failed — {e}")
+            log(f"  !! {sym}: Angel One PCR failed — {e}")
 
     cache_save(key, {"pcr_map": pcr_map, "liquid_stocks": list(liquid_stocks)})
     log(f"  → PCR fetched for {len(pcr_map)}/{len(symbols)} stocks  |  {len(liquid_stocks)} liquid")
@@ -411,9 +376,10 @@ def scan():
     log(f"  → {len(long_buildup)} long buildup stocks")
 
     # Step 4 — Live option chain PCR (only for long buildup stocks)
-    lb_symbols = [s["symbol"] for s in long_buildup]
+    lb_symbols  = [s["symbol"] for s in long_buildup]
+    lb_spot_map = {s["symbol"]: s.get("spot_price", 0) for s in long_buildup}
     try:
-        pcr_map, liquid_stocks = get_live_pcr_data(session, lb_symbols, trade_date)
+        pcr_map, liquid_stocks = get_live_pcr_data(lb_symbols, lb_spot_map, trade_date)
     except Exception as e:
         log(f"  !! Option chain fetch failed: {e}")
         pcr_map, liquid_stocks = {}, set()

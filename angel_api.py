@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Angel One SmartAPI wrapper.
-Handles login (TOTP), scrip master token map, and bulk equity LTP quotes.
+Handles login (TOTP), scrip master token map, equity LTP quotes,
+and NFO option chain PCR calculation — all without NSE scraping.
 
 Required env vars:
   ANGEL_API_KEY     — from smartapi.angelone.in
@@ -14,7 +15,7 @@ import os
 import json
 import time
 import requests
-from datetime import date
+from datetime import date, datetime
 
 ANGEL_BASE       = "https://apiconnect.angelone.in"
 SCRIP_MASTER_URL = "https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json"
@@ -29,7 +30,8 @@ class AngelOneAPI:
         self.totp_secret = os.environ.get("ANGEL_TOTP_SECRET", "")
         self.jwt_token   = None
         self._token_date = None
-        self._token_map  = None   # NSE symbol -> symbolToken string
+        self._token_map  = None   # NSE symbol -> symbolToken
+        self._nfo_map    = None   # {name: [{token, expiry, strike, optiontype}]}
 
     # ── Headers ───────────────────────────────────────────────────────────────
     def _base_headers(self):
@@ -71,52 +73,87 @@ class AngelOneAPI:
         print(f"  [angel] Logged in ✓")
 
     def ensure_session(self):
-        """Re-login if token missing or from a previous day."""
         if self._token_date != date.today() or not self.jwt_token:
             self.login()
 
     # ── Scrip master ─────────────────────────────────────────────────────────
-    def _load_token_map(self):
+    def _load_scrip_master(self):
         """
-        Build NSE equity symbol → symbolToken map from Angel One scrip master.
-        Cached daily — scrip master changes infrequently.
+        Load scrip master once daily.
+        Builds:
+          _token_map : NSE equity symbol -> token
+          _nfo_map   : stock name -> list of option instrument dicts
         """
         cache_file = os.path.join(CACHE_DIR, "scrip_tokens.json")
-        if os.path.exists(cache_file):
-            age = time.time() - os.path.getmtime(cache_file)
-            if age < 86400:
-                with open(cache_file) as f:
-                    self._token_map = json.load(f)
-                print(f"  [angel] Token map: {len(self._token_map)} NSE symbols (cache)")
-                return
+        nfo_cache  = os.path.join(CACHE_DIR, "scrip_nfo.json")
+
+        if (os.path.exists(cache_file) and os.path.exists(nfo_cache) and
+                time.time() - os.path.getmtime(cache_file) < 86400):
+            with open(cache_file) as f:
+                self._token_map = json.load(f)
+            with open(nfo_cache) as f:
+                self._nfo_map = json.load(f)
+            print(f"  [angel] Scrip master: {len(self._token_map)} NSE  |  "
+                  f"{len(self._nfo_map)} NFO names (cache)")
+            return
 
         print("  [angel] Downloading scrip master (~5 MB)...")
         resp = requests.get(SCRIP_MASTER_URL, timeout=60)
         resp.raise_for_status()
+        master = resp.json()
 
         token_map = {}
-        for item in resp.json():
-            if item.get("exch_seg") == "NSE" and item.get("instrumenttype") in ("", "EQ"):
+        nfo_map   = {}
+
+        for item in master:
+            seg  = item.get("exch_seg", "")
+            itype = item.get("instrumenttype", "")
+
+            # NSE equities
+            if seg == "NSE" and itype in ("", "EQ"):
                 sym = item.get("symbol", "").replace("-EQ", "").replace("-BE", "").strip()
                 if sym:
                     token_map[sym] = str(item["token"])
 
+            # NFO stock options (OPTSTK)
+            elif seg == "NFO" and itype == "OPTSTK":
+                name   = item.get("name", "").strip()
+                expiry = item.get("expiry", "").strip()
+                strike = item.get("strike", "0")
+                otype  = item.get("symbol", "")[-2:]   # last 2 chars: CE or PE
+                token  = str(item["token"])
+                if name and expiry and otype in ("CE", "PE"):
+                    if name not in nfo_map:
+                        nfo_map[name] = []
+                    nfo_map[name].append({
+                        "token":      token,
+                        "expiry":     expiry,
+                        "strike":     float(strike),
+                        "optiontype": otype,
+                    })
+
         os.makedirs(CACHE_DIR, exist_ok=True)
         with open(cache_file, "w") as f:
             json.dump(token_map, f)
-        self._token_map = token_map
-        print(f"  [angel] Token map cached: {len(token_map)} NSE symbols")
+        with open(nfo_cache, "w") as f:
+            json.dump(nfo_map, f)
 
-    # ── Market data ───────────────────────────────────────────────────────────
+        self._token_map = token_map
+        self._nfo_map   = nfo_map
+        print(f"  [angel] Scrip master cached: {len(token_map)} NSE  |  {len(nfo_map)} NFO names")
+
+    def _load_token_map(self):
+        self._load_scrip_master()
+
+    # ── Equity LTP quotes ─────────────────────────────────────────────────────
     def get_quotes(self, symbols):
         """
         Fetch LTP + previous close for a list of NSE equity symbols.
         Returns: {symbol: {"ltp": float, "prev_close": float}}
-        Silently skips symbols not found in scrip master.
         """
         self.ensure_session()
         if not self._token_map:
-            self._load_token_map()
+            self._load_scrip_master()
 
         sym_to_tok = {s: self._token_map[s] for s in symbols if s in self._token_map}
         tok_to_sym = {v: k for k, v in sym_to_tok.items()}
@@ -146,5 +183,70 @@ class AngelOneAPI:
                             "ltp":        float(item.get("ltp")   or 0),
                             "prev_close": float(item.get("close") or 0),
                         }
-
         return results
+
+    # ── NFO option chain PCR ──────────────────────────────────────────────────
+    def get_pcr(self, symbol, spot_price):
+        """
+        Calculate PCR and liquidity from Angel One NFO option chain data.
+        Uses near-month expiry + ATM ±15% strikes.
+        Returns (pcr, is_liquid).
+        """
+        self.ensure_session()
+        if not self._nfo_map:
+            self._load_scrip_master()
+
+        instruments = self._nfo_map.get(symbol, [])
+        if not instruments:
+            return None, False
+
+        # Find nearest expiry
+        def parse_expiry(e):
+            try:
+                return datetime.strptime(e, "%d%b%Y")
+            except Exception:
+                return datetime.max
+
+        expiries    = sorted({i["expiry"] for i in instruments}, key=parse_expiry)
+        near_expiry = expiries[0] if expiries else None
+        if not near_expiry:
+            return None, False
+
+        lower, upper = spot_price * 0.85, spot_price * 1.15
+        near_opts = [
+            i for i in instruments
+            if i["expiry"] == near_expiry and lower <= i["strike"] <= upper
+        ]
+
+        if not near_opts:
+            return None, False
+
+        # Fetch OI for all near-month ATM options in one batch call
+        tokens    = [i["token"] for i in near_opts]
+        tok_meta  = {i["token"]: i for i in near_opts}
+
+        ce_oi = pe_oi = 0
+        for i in range(0, len(tokens), 50):
+            batch = tokens[i:i+50]
+            resp  = requests.post(
+                f"{ANGEL_BASE}/rest/secure/angelbroking/market/v1/quote/",
+                headers=self._auth_headers(),
+                json={"mode": "FULL", "exchangeTokens": {"NFO": batch}},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            body = resp.json()
+            if body.get("status") and body.get("data"):
+                for item in body["data"].get("fetched", []):
+                    tok = str(item.get("symbolToken", ""))
+                    meta = tok_meta.get(tok)
+                    oi   = int(item.get("opnInterest") or item.get("openInterest") or 0)
+                    if meta:
+                        if meta["optiontype"] == "CE":
+                            ce_oi += oi
+                        else:
+                            pe_oi += oi
+
+        pcr       = round(pe_oi / ce_oi, 2) if ce_oi > 0 else None
+        is_liquid = (ce_oi + pe_oi) >= 500
+        return pcr, is_liquid
