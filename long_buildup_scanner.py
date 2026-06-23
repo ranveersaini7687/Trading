@@ -32,6 +32,7 @@ HEADERS = {
 MIN_PCR           = 0.8
 MIN_OI_CHANGE_PCT = 2.0
 MIN_VOLUME_RATIO  = 1.5   # today's volume must be >= 1.5× 20-day average
+EMA_PERIODS       = (9, 21, 50)   # bullish stack: price > 9 EMA > 21 EMA > 50 EMA
 SKIP_SYMBOLS      = {"NIFTY", "FINNIFTY", "BANKNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "NIFTYNXT50"}
 CACHE_DIR         = "cache"
 LIVE_TTL_SEC      = 300   # 5 min for intraday data (OI spurts, prices)
@@ -229,6 +230,20 @@ def get_avg_volumes_data(symbols, trade_date):
     return avg_vols
 
 
+# ── Step 3c: EMA stack ────────────────────────────────────────────────────────
+def get_ema_stack_data(symbols, trade_date):
+    log(f"Step 3c — EMA stack ({'/'.join(str(p) for p in EMA_PERIODS)}) for {len(symbols)} stocks")
+    key    = f"ema_stack_{trade_date}"
+    cached = cache_load(key)   # date-keyed, valid all day
+    if cached is not None:
+        log(f"  → {len(cached)} EMA entries (from cache)")
+        return cached
+    ema_data = angel.get_ema_stack(symbols)
+    cache_save(key, ema_data)
+    log(f"  → EMA stack computed for {len(ema_data)} stocks")
+    return ema_data
+
+
 # ── Step 4: Live option chain — PCR + liquidity (Angel One NFO) ──────────────
 def get_live_pcr_data(symbols, spot_prices, trade_date):
     """
@@ -336,7 +351,7 @@ def scan():
     log("=" * 65)
     log("  AUTO TRADER — Long Buildup Scanner")
     log(f"  Date  : {datetime.now().strftime('%d %b %Y %H:%M IST')}")
-    log(f"  Filter: Price UP + OI >= +{MIN_OI_CHANGE_PCT}% + Vol >= {MIN_VOLUME_RATIO}x avg + PCR >= {MIN_PCR}")
+    log(f"  Filter: Price UP + OI >= +{MIN_OI_CHANGE_PCT}% + Vol >= {MIN_VOLUME_RATIO}x + EMA {'/'.join(str(p) for p in EMA_PERIODS)} stack + PCR >= {MIN_PCR}")
     log(f"  Macro : FII {FII_LOOKBACK_DAYS}-day rolling  |  BEARISH<{FII_BEARISH_THRESH}Cr, CAUTIOUS<{FII_CAUTIOUS_THRESH}Cr")
     log(f"  Cache : {os.path.abspath(CACHE_DIR)}  |  Live TTL: {LIVE_TTL_SEC}s")
     log("=" * 65)
@@ -410,9 +425,28 @@ def scan():
             vol_passed.append({**stock, "vol_ratio": ratio})
     log(f"  → {len(vol_passed)} stocks passed volume filter")
 
-    # Step 4 — Live option chain PCR (only for volume-confirmed stocks)
-    lb_symbols  = [s["symbol"] for s in vol_passed]
-    lb_spot_map = {s["symbol"]: s.get("spot_price", 0) for s in vol_passed}
+    # Step 3c — EMA stack filter
+    ema_syms  = [s["symbol"] for s in vol_passed]
+    ema_data  = get_ema_stack_data(ema_syms, trade_date)
+    log(f"Step 3c — EMA stack filter (Price > 9EMA > 21EMA > 50EMA)")
+    ema_passed = []
+    for stock in vol_passed:
+        sym   = stock["symbol"]
+        ed    = ema_data.get(sym, {})
+        e9, e21, e50 = ed.get("ema9"), ed.get("ema21"), ed.get("ema50")
+        ok    = ed.get("passes", False)
+        marker = "✓" if ok else " "
+        e9s   = f"{e9:.1f}"  if e9  else "N/A"
+        e21s  = f"{e21:.1f}" if e21 else "N/A"
+        e50s  = f"{e50:.1f}" if e50 else "N/A"
+        log(f"  {marker} {sym:<15} 9EMA: {e9s:>8}  21EMA: {e21s:>8}  50EMA: {e50s:>8}  {'PASS' if ok else 'FAIL'}")
+        if ok:
+            ema_passed.append({**stock, "ema9": e9, "ema21": e21, "ema50": e50})
+    log(f"  → {len(ema_passed)} stocks passed EMA stack filter")
+
+    # Step 4 — Live option chain PCR (only for EMA-confirmed stocks)
+    lb_symbols  = [s["symbol"] for s in ema_passed]
+    lb_spot_map = {s["symbol"]: s.get("spot_price", 0) for s in ema_passed}
     try:
         pcr_map, liquid_stocks = get_live_pcr_data(lb_symbols, lb_spot_map, trade_date)
     except Exception as e:
@@ -422,7 +456,7 @@ def scan():
     # Step 5 — PCR + liquidity filter
     log(f"Step 5 — PCR >= {MIN_PCR} + Liquid only")
     results = []
-    for stock in vol_passed:
+    for stock in ema_passed:
         sym     = stock["symbol"]
         pcr     = pcr_map.get(sym)
         liquid  = sym in liquid_stocks
@@ -464,7 +498,7 @@ def scan():
         "scan_time": datetime.now().isoformat(),
         "criteria": {"min_oi_chg_pct": MIN_OI_CHANGE_PCT, "min_pcr": MIN_PCR},
         "macro":    {"sentiment": sentiment, "fii_5d_net_cr": macro["fii_nd_net"], "days": macro["days"], "history": macro["records"]},
-        "summary":  {"oi_spurt_stocks": len(oi_stocks), "long_buildup": len(long_buildup), "vol_passed": len(vol_passed), "matched": len(results)},
+        "summary":  {"oi_spurt_stocks": len(oi_stocks), "long_buildup": len(long_buildup), "vol_passed": len(vol_passed), "ema_passed": len(ema_passed), "matched": len(results)},
         "results":  results,
     }
     with open("scan_results.json", "w") as f:

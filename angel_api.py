@@ -186,6 +186,69 @@ class AngelOneAPI:
                         }
         return results
 
+    # ── EMA stack (9 / 21 / 50) ──────────────────────────────────────────────
+    @staticmethod
+    def _ema(closes, period):
+        if len(closes) < period:
+            return None
+        k   = 2 / (period + 1)
+        ema = sum(closes[:period]) / period   # seed with SMA
+        for p in closes[period:]:
+            ema = p * k + ema * (1 - k)
+        return round(ema, 2)
+
+    def get_ema_stack(self, symbols):
+        """
+        Returns {symbol: {"ema9": float, "ema21": float, "ema50": float, "passes": bool}}
+        'passes' = current price > ema9 > ema21 > ema50
+        Fetches 90 calendar days of daily candles (gives ~63 trading days, enough for EMA50).
+        """
+        self.ensure_session()
+        if not self._token_map:
+            self._load_scrip_master()
+
+        from_date = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d %H:%M")
+        to_date   = datetime.now().strftime("%Y-%m-%d %H:%M")
+        result    = {}
+
+        for sym in symbols:
+            token = self._token_map.get(sym)
+            if not token:
+                result[sym] = {"ema9": None, "ema21": None, "ema50": None, "passes": False}
+                continue
+            try:
+                resp = requests.post(
+                    f"{ANGEL_BASE}/rest/secure/angelbroking/historical/v1/getCandleData",
+                    headers=self._auth_headers(),
+                    json={
+                        "exchange":    "NSE",
+                        "symboltoken": token,
+                        "interval":    "ONE_DAY",
+                        "fromdate":    from_date,
+                        "todate":      to_date,
+                    },
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                candles = resp.json().get("data", [])
+                closes  = [c[4] for c in candles if c[4] > 0]   # index 4 = close
+                if not closes:
+                    result[sym] = {"ema9": None, "ema21": None, "ema50": None, "passes": False}
+                    continue
+                price = closes[-1]   # latest close (today's)
+                ema9  = self._ema(closes, 9)
+                ema21 = self._ema(closes, 21)
+                ema50 = self._ema(closes, 50)
+                passes = (
+                    ema9 is not None and ema21 is not None and ema50 is not None
+                    and price > ema9 > ema21 > ema50
+                )
+                result[sym] = {"ema9": ema9, "ema21": ema21, "ema50": ema50, "passes": passes}
+            except Exception:
+                result[sym] = {"ema9": None, "ema21": None, "ema50": None, "passes": False}
+
+        return result
+
     # ── 20-day average volume ─────────────────────────────────────────────────
     def get_avg_volumes(self, symbols):
         """
