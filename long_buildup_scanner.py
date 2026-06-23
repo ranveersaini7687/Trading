@@ -31,7 +31,7 @@ HEADERS = {
 
 MIN_PCR           = 0.8
 MIN_OI_CHANGE_PCT = 2.0
-SKIP_SYMBOLS      = {"NIFTY", "FINNIFTY", "BANKNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"}
+SKIP_SYMBOLS      = {"NIFTY", "FINNIFTY", "BANKNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "NIFTYNXT50"}
 CACHE_DIR         = "cache"
 LIVE_TTL_SEC      = 300   # 5 min for intraday data (OI spurts, prices)
 MAX_RETRIES       = 3
