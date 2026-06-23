@@ -97,11 +97,12 @@ def build_summary():
     return "\n".join(lines)
 
 
-print("=" * 60)
-print("  AUTO TRADER — Daily Run")
-print("=" * 60)
-scan()
-paper_run()
+if __name__ == "__main__":
+    print("=" * 60)
+    print("  AUTO TRADER — Daily Run")
+    print("=" * 60)
+    scan()
+    paper_run()
 
-print("\n  Sending WhatsApp summary...")
-send_whatsapp(build_summary())
+    print("\n  Sending WhatsApp summary...")
+    send_whatsapp(build_summary())

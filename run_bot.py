@@ -50,13 +50,17 @@ def run_cycle():
     import importlib
     import long_buildup_scanner
     import paper_trader
+    import run_once
     importlib.reload(long_buildup_scanner)
     importlib.reload(paper_trader)
+    importlib.reload(run_once)
 
     log("── Scanner ──────────────────────────────────")
     long_buildup_scanner.scan()
     log("── Paper Trader ─────────────────────────────")
     paper_trader.run()
+    log("── Sending WhatsApp summary ─────────────────")
+    run_once.send_whatsapp(run_once.build_summary())
     log("── Cycle complete ───────────────────────────")
 
 
