@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 
 MARKET_OPEN_H,  MARKET_OPEN_M  =  9, 15
 MARKET_CLOSE_H, MARKET_CLOSE_M = 15, 30
-POST_MARKET_H,  POST_MARKET_M  = 16, 40   # bhav copy usually available by 4:30 PM
+EOD_SCAN_H,     EOD_SCAN_M     = 15, 15   # 3:15 PM — full scan with live data
 SCAN_INTERVAL_SEC = 300   # 5 minutes
 
 
@@ -37,20 +37,13 @@ def is_market_open():
     return open_t <= t <= close_t
 
 
-def is_post_market_window():
-    """True from 4:40 PM onwards on weekdays (until midnight)."""
+def is_eod_scan_time():
+    """True from 3:15 PM onwards during market hours on weekdays."""
     now = datetime.now()
     if now.weekday() >= 5:
         return False
-    t      = now.hour * 60 + now.minute
-    post_t = POST_MARKET_H * 60 + POST_MARKET_M
-    return t >= post_t
-
-
-def bhav_copy_fetched_today():
-    """True if today's bhav copy cache file exists (scan succeeded)."""
-    trade_date = datetime.now().strftime("%Y%m%d")
-    return os.path.exists(os.path.join("cache", f"bhavcopy_{trade_date}.json"))
+    t = now.hour * 60 + now.minute
+    return t >= EOD_SCAN_H * 60 + EOD_SCAN_M
 
 
 def seconds_until_open():
@@ -96,67 +89,54 @@ def run_cycle(notify=False):
 
 def main():
     once = "--once" in sys.argv
-    post_market_done_date = None   # track which date post-market scan completed
 
     log("=" * 60)
     log("  AUTO TRADER BOT — Starting up")
     log(f"  Market hours : {MARKET_OPEN_H:02d}:{MARKET_OPEN_M:02d} – "
         f"{MARKET_CLOSE_H:02d}:{MARKET_CLOSE_M:02d} IST  Mon–Fri")
-    log(f"  Post-market  : {POST_MARKET_H:02d}:{POST_MARKET_M:02d} IST (bhav copy scan, retries every 5 min)")
-    log(f"  Scan interval: every {SCAN_INTERVAL_SEC // 60} minutes")
+    log(f"  EOD scan     : {EOD_SCAN_H:02d}:{EOD_SCAN_M:02d} IST (Angel One live data, enter positions)")
+    log(f"  Scan interval: every {SCAN_INTERVAL_SEC // 60} minutes (SL/target check)")
     log("  Press Ctrl+C to stop")
     log("=" * 60)
+
+    eod_scan_done_date = None
 
     while True:
         today = datetime.now().strftime("%Y-%m-%d")
 
         if is_market_open():
-            # ── Intraday: SL/target check only, no scanner ─────────
-            try:
-                run_intraday_check()
-            except KeyboardInterrupt:
-                raise
-            except Exception:
-                log("  !! Cycle error (will retry next interval):")
-                traceback.print_exc()
+            if is_eod_scan_time() and eod_scan_done_date != today:
+                # ── 3:15 PM: full scan + enter positions + WhatsApp ─
+                log(f"  EOD scan triggered ({EOD_SCAN_H:02d}:{EOD_SCAN_M:02d}) — running full cycle...")
+                try:
+                    run_cycle(notify=True)
+                    eod_scan_done_date = today
+                    log("  EOD scan complete ✓")
+                except KeyboardInterrupt:
+                    raise
+                except Exception:
+                    log("  !! EOD scan failed:")
+                    traceback.print_exc()
+            else:
+                # ── Before 3:15 PM: SL/target check only ───────────
+                try:
+                    run_intraday_check()
+                except KeyboardInterrupt:
+                    raise
+                except Exception:
+                    log("  !! Intraday check error:")
+                    traceback.print_exc()
 
             if once:
                 log("  --once flag set, exiting after one cycle.")
                 break
 
-            log(f"  Next scan in {SCAN_INTERVAL_SEC // 60} min "
+            log(f"  Next check in {SCAN_INTERVAL_SEC // 60} min "
                 f"(~{(datetime.now() + timedelta(seconds=SCAN_INTERVAL_SEC)).strftime('%H:%M')})")
             time.sleep(SCAN_INTERVAL_SEC)
 
-        elif is_post_market_window() and post_market_done_date != today:
-            # ── Post-market bhav copy scan ─────────────────────────
-            if bhav_copy_fetched_today():
-                log("  Post-market: bhav copy already cached — skipping extra scan.")
-                post_market_done_date = today
-                if once:
-                    break
-                for _ in range(60):
-                    time.sleep(10)
-                    if is_market_open():
-                        break
-            else:
-                log(f"  Post-market scan — fetching bhav copy (retry every 5 min)...")
-                try:
-                    run_cycle(notify=True)   # daily WhatsApp fires here once
-                    post_market_done_date = today
-                    log("  Post-market scan complete ✓")
-                except KeyboardInterrupt:
-                    raise
-                except Exception:
-                    log("  !! Post-market cycle failed — retrying in 5 min:")
-                    traceback.print_exc()
-
-                if once:
-                    break
-                time.sleep(SCAN_INTERVAL_SEC)
-
         else:
-            # ── Sleep until next event ─────────────────────────────
+            # ── Sleep until market open ────────────────────────────
             now  = datetime.now()
             secs = seconds_until_open()
             h, m = divmod(secs // 60, 60)
@@ -176,7 +156,7 @@ def main():
 
             for _ in range(60):
                 time.sleep(10)
-                if is_market_open() or (is_post_market_window() and post_market_done_date != today):
+                if is_market_open():
                     break
 
 

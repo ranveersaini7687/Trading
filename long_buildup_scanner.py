@@ -11,13 +11,13 @@ TTL: OI / prices = 5 min (live); Bhav copy / market cap = full day (date-keyed).
 import requests
 import time
 import json
-import io
 import os
-import zipfile
 import functools
-import yfinance as yf
 import pandas as pd
 from datetime import datetime
+from angel_api import AngelOneAPI
+
+angel = AngelOneAPI()
 
 # ── Config ────────────────────────────────────────────────────────────────────
 HEADERS = {
@@ -174,135 +174,108 @@ def get_oi_spurt_stocks(session, trade_date):
     return stocks
 
 
-# ── Step 2: Price changes ─────────────────────────────────────────────────────
-@retry
-def _fetch_price_changes(symbols):
-    tickers_yf = [f"{s}.NS" for s in symbols]
-    df = yf.download(
-        tickers_yf,
-        period="2d",
-        interval="1d",
-        group_by="ticker",
-        auto_adjust=True,
-        progress=False,
-    )
-    price_changes = {}
-    for sym in symbols:
-        try:
-            closes = (
-                df[f"{sym}.NS"]["Close"].dropna().values
-                if len(symbols) > 1
-                else df["Close"].dropna().values
-            )
-            price_changes[sym] = (
-                round(((closes[-1] - closes[-2]) / closes[-2]) * 100, 2)
-                if len(closes) >= 2 else None
-            )
-        except Exception:
-            price_changes[sym] = None
-    return price_changes
-
-
+# ── Step 2: Live quotes (Angel One) ──────────────────────────────────────────
 def get_price_changes(symbols, trade_date):
-    log(f"Step 2 — Price data for {len(symbols)} stocks (Yahoo Finance)")
+    """
+    Returns ({symbol: price_chg_pct}, {symbol: ltp}).
+    Uses Angel One SmartAPI for live LTP + previous close.
+    """
+    log(f"Step 2 — Live quotes for {len(symbols)} stocks (Angel One)")
     key = f"price_changes_{trade_date}"
     cached = cache_load(key, ttl_sec=LIVE_TTL_SEC)
     if cached is not None:
-        log(f"  → {sum(v is not None for v in cached.values())} stocks (from cache)")
-        return cached
-    price_changes = _fetch_price_changes(symbols)
-    cache_save(key, price_changes)
-    valid = sum(v is not None for v in price_changes.values())
-    log(f"  → Price data fetched for {valid}/{len(symbols)} stocks")
-    return price_changes
+        changes = cached.get("changes", {})
+        ltps    = cached.get("ltps", {})
+        log(f"  → {sum(v is not None for v in changes.values())} stocks (from cache)")
+        return changes, ltps
+
+    try:
+        quotes = angel.get_quotes(symbols)
+    except Exception as e:
+        log(f"  !! Angel One quote fetch failed: {e}")
+        return {s: None for s in symbols}, {s: None for s in symbols}
+
+    changes, ltps = {}, {}
+    for sym in symbols:
+        q = quotes.get(sym)
+        if q and q["ltp"] and q["prev_close"]:
+            changes[sym] = round((q["ltp"] - q["prev_close"]) / q["prev_close"] * 100, 2)
+            ltps[sym]    = q["ltp"]
+        else:
+            changes[sym] = None
+            ltps[sym]    = None
+
+    cache_save(key, {"changes": changes, "ltps": ltps})
+    valid = sum(v is not None for v in changes.values())
+    log(f"  → Live quotes fetched for {valid}/{len(symbols)} stocks")
+    return changes, ltps
 
 
-# ── Step 4: Bhav copy — PCR + liquidity ──────────────────────────────────────
-@retry
-def _fetch_bhavcopy(trade_date_str):
-    url = f"https://nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_{trade_date_str}_F_0000.csv.zip"
-    r = requests.get(url, headers={"User-Agent": HEADERS["User-Agent"]}, timeout=30)
-    r.raise_for_status()
-    z = zipfile.ZipFile(io.BytesIO(r.content))
-    return pd.read_csv(z.open(z.namelist()[0]))
+# ── Step 4: Live option chain — PCR + liquidity (NSE API) ────────────────────
+MIN_ATM_OI = 500   # minimum combined ATM OI to consider a stock liquid
+
+def _fetch_option_chain_pcr(session, symbol):
+    """
+    Fetch live option chain for one symbol and return (pcr, is_liquid).
+    Uses near-month expiry, ATM ±15% strikes.
+    """
+    url  = f"https://www.nseindia.com/api/option-chain-equities?symbol={symbol}"
+    resp = session.get(url, timeout=10)
+    resp.raise_for_status()
+    data = resp.json()
+
+    records     = data.get("records", {}).get("data", [])
+    spot        = data.get("records", {}).get("underlyingValue", 0)
+    expiry_list = data.get("records", {}).get("expiryDates", [])
+
+    if not spot or not records or not expiry_list:
+        return None, False
+
+    near_expiry = expiry_list[0]
+    lower, upper = spot * 0.85, spot * 1.15
+    ce_oi = pe_oi = 0
+
+    for rec in records:
+        if rec.get("expiryDate") != near_expiry:
+            continue
+        strike = rec.get("strikePrice", 0)
+        if lower <= strike <= upper:
+            ce_oi += rec.get("CE", {}).get("openInterest", 0)
+            pe_oi += rec.get("PE", {}).get("openInterest", 0)
+
+    pcr       = round(pe_oi / ce_oi, 2) if ce_oi > 0 else None
+    is_liquid = (ce_oi + pe_oi) >= MIN_ATM_OI
+    return pcr, is_liquid
 
 
-def get_bhavcopy_data(trade_date):
-    log(f"Step 4 — NSE F&O Bhav copy ({trade_date})")
-    key = f"bhavcopy_{trade_date}"
-    cached = cache_load(key)   # date-keyed, no TTL
+def get_live_pcr_data(session, symbols, trade_date):
+    """
+    Fetch live PCR + liquidity for each symbol via NSE option chain API.
+    Returns ({symbol: pcr}, {symbol: is_liquid}).
+    """
+    log(f"Step 4 — Live option chain PCR for {len(symbols)} stocks (NSE)")
+    key    = f"live_pcr_{trade_date}"
+    cached = cache_load(key, ttl_sec=LIVE_TTL_SEC)
     if cached is not None:
-        pcr_map      = cached["pcr_map"]
-        liquid_stocks = set(cached["liquid_stocks"])
-        log(f"  → {len(pcr_map)} PCR entries, {len(liquid_stocks)} liquid stocks (from cache)")
-        return pcr_map, liquid_stocks
+        log(f"  → {len(cached['pcr_map'])} PCR entries (from cache)")
+        return cached["pcr_map"], set(cached["liquid_stocks"])
 
-    df = _fetch_bhavcopy(trade_date)
-
-    # ── Liquidity: total option volume across all expiries ──
-    opts = df[df["FinInstrmTp"] == "STO"][["TckrSymb", "TtlTradgVol"]].copy()
-    opts["TtlTradgVol"] = pd.to_numeric(opts["TtlTradgVol"], errors="coerce").fillna(0)
-    total_vol     = opts.groupby("TckrSymb")["TtlTradgVol"].sum()
-    vol_threshold = total_vol.quantile(0.60)
-    liquid_stocks = set(total_vol[total_vol >= vol_threshold].index)
-    log(f"  → Liquidity threshold: {vol_threshold:,.0f} contracts | {len(liquid_stocks)} liquid stocks")
-
-    # ── PCR: near-month expiry + ATM ±15% strikes ──
-    full = df[df["FinInstrmTp"] == "STO"][
-        ["TckrSymb", "OptnTp", "XpryDt", "StrkPric", "OpnIntrst", "UndrlygPric"]
-    ].copy()
-    for col in ["OpnIntrst", "StrkPric", "UndrlygPric"]:
-        full[col] = pd.to_numeric(full[col], errors="coerce")
-    full["OpnIntrst"] = full["OpnIntrst"].fillna(0)
-    full["XpryDt"]    = pd.to_datetime(full["XpryDt"])
-
-    near_expiry = full.groupby("TckrSymb")["XpryDt"].min()
-    near = full[full.apply(lambda r: r["XpryDt"] == near_expiry.get(r["TckrSymb"]), axis=1)].copy()
-    near = near[
-        (near["StrkPric"] >= near["UndrlygPric"] * 0.85) &
-        (near["StrkPric"] <= near["UndrlygPric"] * 1.15)
-    ]
-
-    call_oi    = near[near["OptnTp"] == "CE"].groupby("TckrSymb")["OpnIntrst"].sum()
-    put_oi     = near[near["OptnTp"] == "PE"].groupby("TckrSymb")["OpnIntrst"].sum()
-    pcr_map    = (put_oi / call_oi.replace(0, float("nan"))).dropna().round(2).to_dict()
-    log(f"  → PCR calculated for {len(pcr_map)} stocks (near-month, ATM ±15%)")
+    pcr_map, liquid_stocks = {}, set()
+    for sym in symbols:
+        try:
+            pcr, liquid = _fetch_option_chain_pcr(session, sym)
+            if pcr is not None:
+                pcr_map[sym] = pcr
+            if liquid:
+                liquid_stocks.add(sym)
+            time.sleep(0.3)   # avoid NSE rate limit
+        except Exception as e:
+            log(f"  !! {sym}: option chain failed — {e}")
 
     cache_save(key, {"pcr_map": pcr_map, "liquid_stocks": list(liquid_stocks)})
+    log(f"  → PCR fetched for {len(pcr_map)}/{len(symbols)} stocks  |  {len(liquid_stocks)} liquid")
     return pcr_map, liquid_stocks
 
-
-# ── Step 6: Market cap ────────────────────────────────────────────────────────
-@retry
-def _fetch_market_cap(symbol):
-    fi = yf.Ticker(f"{symbol}.NS").fast_info
-    return round(fi.market_cap / 1e7) if fi.market_cap else None
-
-
-def get_market_caps(symbols, trade_date):
-    log(f"Step 6 — Market cap for {len(symbols)} matched stocks (Yahoo Finance)")
-    key = f"market_cap_{trade_date}"
-    cached = cache_load(key) or {}   # date-keyed, partial dict OK
-    result = {}
-    to_fetch = [s for s in symbols if s not in cached]
-
-    for sym in to_fetch:
-        try:
-            mcap = _fetch_market_cap(sym)
-            cached[sym] = mcap
-            log(f"  {sym:<15} ₹{mcap:,} Cr" if mcap else f"  {sym:<15} N/A")
-        except Exception as e:
-            cached[sym] = None
-            log(f"  {sym:<15} !! {e}")
-
-    if to_fetch:
-        cache_save(key, cached)
-    else:
-        log("  → All from cache")
-
-    for sym in symbols:
-        result[sym] = cached.get(sym)
-    return result
 
 
 # ── Step 7: FII/DII flow data ─────────────────────────────────────────────────
@@ -410,10 +383,15 @@ def scan():
     symbols   = [s["symbol"] for s in oi_stocks]
     oi_map    = {s["symbol"]: s for s in oi_stocks}
 
-    # Step 2
-    price_changes = get_price_changes(symbols, trade_date)
+    # Step 2 — Angel One live quotes (returns both price_changes and ltps)
+    price_changes, ltps = get_price_changes(symbols, trade_date)
 
-    # Step 3 — filter (no API, no cache needed)
+    # Update spot_price with live LTP for accurate entry price
+    for sym in symbols:
+        if ltps.get(sym):
+            oi_map[sym]["spot_price"] = ltps[sym]
+
+    # Step 3 — Long buildup filter
     log(f"Step 3 — Long Buildup filter (Price UP + OI >= +{MIN_OI_CHANGE_PCT}%)")
     long_buildup = []
     for sym in symbols:
@@ -429,20 +407,21 @@ def scan():
             long_buildup.append({**oi_map[sym], "price_chg": price_chg})
     log(f"  → {len(long_buildup)} long buildup stocks")
 
-    # Step 4
+    # Step 4 — Live option chain PCR (only for long buildup stocks)
+    lb_symbols = [s["symbol"] for s in long_buildup]
     try:
-        pcr_map, liquid_stocks = get_bhavcopy_data(trade_date)
+        pcr_map, liquid_stocks = get_live_pcr_data(session, lb_symbols, trade_date)
     except Exception as e:
-        log(f"  !! Bhav copy failed after retries: {e}")
+        log(f"  !! Option chain fetch failed: {e}")
         pcr_map, liquid_stocks = {}, set()
 
-    # Step 5 — filter (no API)
+    # Step 5 — PCR + liquidity filter
     log(f"Step 5 — PCR >= {MIN_PCR} + Liquid only")
     results = []
     for stock in long_buildup:
-        sym    = stock["symbol"]
-        pcr    = pcr_map.get(sym)
-        liquid = sym in liquid_stocks
+        sym     = stock["symbol"]
+        pcr     = pcr_map.get(sym)
+        liquid  = sym in liquid_stocks
         pcr_str = f"{pcr:.2f}" if pcr is not None else "N/A"
         if pcr is not None and pcr >= MIN_PCR and liquid:
             results.append({**stock, "pcr": pcr})
@@ -452,13 +431,6 @@ def scan():
             if pcr is None or pcr < MIN_PCR: reasons.append(f"PCR {pcr_str}")
             if not liquid: reasons.append("illiquid")
             log(f"     {sym:<15} PCR: {pcr_str}  liquid: {'yes' if liquid else 'no '}  → {', '.join(reasons)}")
-
-    # Step 6
-    mcap_map = {}
-    if results:
-        mcap_map = get_market_caps([r["symbol"] for r in results], trade_date)
-        for r in results:
-            r["market_cap_cr"] = mcap_map.get(r["symbol"])
 
     # ── Results table ──────────────────────────────────────────────────────────
     MACRO_ICON = {"BULLISH": "▲", "NEUTRAL": "─", "CAUTIOUS": "!", "BEARISH": "▼", "UNKNOWN": "?"}
@@ -474,12 +446,11 @@ def scan():
 
     if results:
         results_sorted = sorted(results, key=lambda x: x["oi_chg"], reverse=True)
-        print(f"\n{'#':<4} {'Symbol':<15} {'Spot Price':>10} {'Price Chg%':>11} {'OI Chg%':>10} {'PCR':>7} {'Mkt Cap (Cr)':>14}  {'Macro':>9}")
-        print("-" * 87)
+        print(f"\n{'#':<4} {'Symbol':<15} {'Spot Price':>10} {'Price Chg%':>11} {'OI Chg%':>10} {'PCR':>7}  {'Macro':>9}")
+        print("-" * 72)
         for idx, r in enumerate(results_sorted, 1):
-            mcap  = f"₹{r['market_cap_cr']:>10,}" if r.get("market_cap_cr") else "          N/A"
             macro_col = f"[{icon}] {sentiment}"
-            print(f"{idx:<4} {r['symbol']:<15} {r['spot_price']:>10.2f} {r['price_chg']:>+10.2f}% {r['oi_chg']:>+9.2f}% {r['pcr']:>7.2f} {mcap:>14}  {macro_col}")
+            print(f"{idx:<4} {r['symbol']:<15} {r['spot_price']:>10.2f} {r['price_chg']:>+10.2f}% {r['oi_chg']:>+9.2f}% {r['pcr']:>7.2f}  {macro_col}")
         print()
         log(f"Total matched: {len(results)} stocks  |  FII 5D Net: ₹{macro['fii_nd_net']:+,.2f} Cr  [{icon}] {sentiment}")
     else:
