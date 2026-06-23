@@ -128,7 +128,7 @@ class AngelOneAPI:
                     nfo_map[name].append({
                         "token":      token,
                         "expiry":     expiry,
-                        "strike":     float(strike),
+                        "strike":     float(strike) / 100.0,  # scrip master stores paise (×100)
                         "optiontype": otype,
                     })
 
