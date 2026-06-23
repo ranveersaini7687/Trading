@@ -132,6 +132,8 @@ def init_session():
     time.sleep(2)
     session.get("https://www.nseindia.com/market-data/live-equity-market", timeout=15)
     time.sleep(1)
+    session.get("https://www.nseindia.com/option-chain", timeout=15)
+    time.sleep(1)
     return session
 
 
@@ -229,6 +231,7 @@ def _fetch_option_chain_pcr(session, symbol):
     expiry_list = data.get("records", {}).get("expiryDates", [])
 
     if not spot or not records or not expiry_list:
+        log(f"  !! option chain empty: spot={spot} records={len(records)} expiries={expiry_list[:2]}")
         return None, False
 
     near_expiry = expiry_list[0]
