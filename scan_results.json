@@ -1,14 +1,19 @@
 {
-  "scan_time": "2026-06-22T23:06:43.012164",
+  "scan_time": "2026-06-23T00:21:26.367025",
   "criteria": {
     "min_oi_chg_pct": 2.0,
     "min_pcr": 0.8
   },
   "macro": {
     "sentiment": "NEUTRAL",
-    "fii_5d_net_cr": -635.91,
-    "days": 1,
+    "fii_5d_net_cr": -1271.82,
+    "days": 2,
     "history": [
+      {
+        "date": "22-Jun-2026",
+        "fii_net": -635.91,
+        "dii_net": 1035.72
+      },
       {
         "date": "22-Jun-2026",
         "fii_net": -635.91,
@@ -18,7 +23,7 @@
   },
   "summary": {
     "oi_spurt_stocks": 212,
-    "long_buildup": 0,
+    "long_buildup": 42,
     "matched": 0
   },
   "results": []
