@@ -63,7 +63,7 @@ def seconds_until_open():
     return max(0, int((nxt - now).total_seconds()))
 
 
-def run_cycle():
+def run_cycle(notify=False):
     import importlib
     import long_buildup_scanner
     import paper_trader
@@ -76,8 +76,9 @@ def run_cycle():
     long_buildup_scanner.scan()
     log("── Paper Trader ─────────────────────────────")
     paper_trader.run()
-    log("── Sending WhatsApp summary ─────────────────")
-    run_once.send_whatsapp(run_once.build_summary())
+    if notify:
+        log("── Sending WhatsApp summary ─────────────────")
+        run_once.send_whatsapp(run_once.build_summary())
     log("── Cycle complete ───────────────────────────")
 
 
@@ -129,7 +130,7 @@ def main():
             else:
                 log(f"  Post-market scan — fetching bhav copy (retry every 5 min)...")
                 try:
-                    run_cycle()
+                    run_cycle(notify=True)   # daily WhatsApp fires here once
                     post_market_done_date = today
                     log("  Post-market scan complete ✓")
                 except KeyboardInterrupt:
