@@ -244,7 +244,7 @@ def generate_excel(portfolio, all_prices):
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
-def run():
+def run(intraday_only=False):
     portfolio = load_portfolio()
     signals, macro = load_signals()
     signal_map = {r["symbol"]: r for r in signals}
@@ -315,6 +315,13 @@ def run():
         log(f"  ✗ CLOSED {sym:<14} Exit ₹{exit_px:.2f}  P&L ₹{sign}{pnl_abs:,.0f} ({sign}{pnl_pct:.2f}%)  [{reason}]")
 
     # ── Step 3: Open new positions ────────────────────────────────────────────
+    if intraday_only:
+        log("  (intraday mode — skipping new entries, SL/target check only)")
+        save_portfolio(portfolio)
+        generate_excel(portfolio, curr_prices)
+        log("=" * 72)
+        return
+
     already_open  = set(portfolio["positions"].keys())
     traded_today  = {t["symbol"] for t in portfolio["closed_trades"] if t["exit_date"] == today}
     skipped_today = [r["symbol"] for r in signals if r["symbol"] in traded_today]

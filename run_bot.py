@@ -63,7 +63,19 @@ def seconds_until_open():
     return max(0, int((nxt - now).total_seconds()))
 
 
+def run_intraday_check():
+    """Every 5-min intraday: only check SL/target on open positions."""
+    import importlib
+    import paper_trader
+    importlib.reload(paper_trader)
+
+    log("── SL/Target Check ──────────────────────────")
+    paper_trader.run(intraday_only=True)
+    log("── Cycle complete ───────────────────────────")
+
+
 def run_cycle(notify=False):
+    """Post-market: full scanner + enter positions + optional WhatsApp."""
     import importlib
     import long_buildup_scanner
     import paper_trader
@@ -99,9 +111,9 @@ def main():
         today = datetime.now().strftime("%Y-%m-%d")
 
         if is_market_open():
-            # ── Intraday scan every 5 min ──────────────────────────
+            # ── Intraday: SL/target check only, no scanner ─────────
             try:
-                run_cycle()
+                run_intraday_check()
             except KeyboardInterrupt:
                 raise
             except Exception:
