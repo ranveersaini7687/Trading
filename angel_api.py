@@ -15,7 +15,7 @@ import os
 import json
 import time
 import requests
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 ANGEL_BASE       = "https://apiconnect.angelone.in"
 SCRIP_MASTER_URL = "https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json"
@@ -180,10 +180,53 @@ class AngelOneAPI:
                     sym = tok_to_sym.get(str(item.get("symbolToken", "")))
                     if sym:
                         results[sym] = {
-                            "ltp":        float(item.get("ltp")   or 0),
-                            "prev_close": float(item.get("close") or 0),
+                            "ltp":        float(item.get("ltp")        or 0),
+                            "prev_close": float(item.get("close")      or 0),
+                            "volume":     int(item.get("tradeVolume")  or 0),
                         }
         return results
+
+    # ── 20-day average volume ─────────────────────────────────────────────────
+    def get_avg_volumes(self, symbols):
+        """
+        Fetch 20-day average daily volume for a list of NSE equity symbols.
+        Returns: {symbol: avg_volume_int}
+        """
+        self.ensure_session()
+        if not self._token_map:
+            self._load_scrip_master()
+
+        from_date = (datetime.now() - timedelta(days=35)).strftime("%Y-%m-%d %H:%M")
+        to_date   = datetime.now().strftime("%Y-%m-%d %H:%M")
+        result    = {}
+
+        for sym in symbols:
+            token = self._token_map.get(sym)
+            if not token:
+                result[sym] = 0
+                continue
+            try:
+                resp = requests.post(
+                    f"{ANGEL_BASE}/rest/secure/angelbroking/historical/v1/getCandleData",
+                    headers=self._auth_headers(),
+                    json={
+                        "exchange":    "NSE",
+                        "symboltoken": token,
+                        "interval":    "ONE_DAY",
+                        "fromdate":    from_date,
+                        "todate":      to_date,
+                    },
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                candles = resp.json().get("data", [])
+                vols = [c[5] for c in candles[:-1] if c[5] > 0]  # exclude today's partial
+                vols = vols[-20:]
+                result[sym] = int(sum(vols) / len(vols)) if vols else 0
+            except Exception:
+                result[sym] = 0
+
+        return result
 
     # ── NFO option chain PCR ──────────────────────────────────────────────────
     def get_pcr(self, symbol, spot_price):

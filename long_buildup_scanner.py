@@ -31,6 +31,7 @@ HEADERS = {
 
 MIN_PCR           = 0.8
 MIN_OI_CHANGE_PCT = 2.0
+MIN_VOLUME_RATIO  = 1.5   # today's volume must be >= 1.5× 20-day average
 SKIP_SYMBOLS      = {"NIFTY", "FINNIFTY", "BANKNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "NIFTYNXT50"}
 CACHE_DIR         = "cache"
 LIVE_TTL_SEC      = 300   # 5 min for intraday data (OI spurts, prices)
@@ -177,8 +178,8 @@ def get_oi_spurt_stocks(session, trade_date):
 # ── Step 2: Live quotes (Angel One) ──────────────────────────────────────────
 def get_price_changes(symbols, trade_date):
     """
-    Returns ({symbol: price_chg_pct}, {symbol: ltp}).
-    Uses Angel One SmartAPI for live LTP + previous close.
+    Returns ({symbol: price_chg_pct}, {symbol: ltp}, {symbol: volume}).
+    Uses Angel One SmartAPI for live LTP + previous close + today's volume.
     """
     log(f"Step 2 — Live quotes for {len(symbols)} stocks (Angel One)")
     key = f"price_changes_{trade_date}"
@@ -186,29 +187,46 @@ def get_price_changes(symbols, trade_date):
     if cached is not None:
         changes = cached.get("changes", {})
         ltps    = cached.get("ltps", {})
+        volumes = cached.get("volumes", {})
         log(f"  → {sum(v is not None for v in changes.values())} stocks (from cache)")
-        return changes, ltps
+        return changes, ltps, volumes
 
     try:
         quotes = angel.get_quotes(symbols)
     except Exception as e:
         log(f"  !! Angel One quote fetch failed: {e}")
-        return {s: None for s in symbols}, {s: None for s in symbols}
+        return {s: None for s in symbols}, {s: None for s in symbols}, {s: 0 for s in symbols}
 
-    changes, ltps = {}, {}
+    changes, ltps, volumes = {}, {}, {}
     for sym in symbols:
         q = quotes.get(sym)
         if q and q["ltp"] and q["prev_close"]:
             changes[sym] = round((q["ltp"] - q["prev_close"]) / q["prev_close"] * 100, 2)
             ltps[sym]    = q["ltp"]
+            volumes[sym] = q.get("volume", 0)
         else:
             changes[sym] = None
             ltps[sym]    = None
+            volumes[sym] = 0
 
-    cache_save(key, {"changes": changes, "ltps": ltps})
+    cache_save(key, {"changes": changes, "ltps": ltps, "volumes": volumes})
     valid = sum(v is not None for v in changes.values())
     log(f"  → Live quotes fetched for {valid}/{len(symbols)} stocks")
-    return changes, ltps
+    return changes, ltps, volumes
+
+
+# ── Step 3b: 20-day average volume ───────────────────────────────────────────
+def get_avg_volumes_data(symbols, trade_date):
+    log(f"Step 3b — 20-day avg volumes for {len(symbols)} stocks (Angel One)")
+    key    = f"avg_volumes_{trade_date}"
+    cached = cache_load(key)   # date-keyed, valid all day
+    if cached is not None:
+        log(f"  → {len(cached)} avg volumes (from cache)")
+        return cached
+    avg_vols = angel.get_avg_volumes(symbols)
+    cache_save(key, avg_vols)
+    log(f"  → Avg volumes fetched for {len(avg_vols)} stocks")
+    return avg_vols
 
 
 # ── Step 4: Live option chain — PCR + liquidity (Angel One NFO) ──────────────
@@ -318,7 +336,7 @@ def scan():
     log("=" * 65)
     log("  AUTO TRADER — Long Buildup Scanner")
     log(f"  Date  : {datetime.now().strftime('%d %b %Y %H:%M IST')}")
-    log(f"  Filter: Price UP + OI >= +{MIN_OI_CHANGE_PCT}% + PCR >= {MIN_PCR} (ATM ±15%, near-month)")
+    log(f"  Filter: Price UP + OI >= +{MIN_OI_CHANGE_PCT}% + Vol >= {MIN_VOLUME_RATIO}x avg + PCR >= {MIN_PCR}")
     log(f"  Macro : FII {FII_LOOKBACK_DAYS}-day rolling  |  BEARISH<{FII_BEARISH_THRESH}Cr, CAUTIOUS<{FII_CAUTIOUS_THRESH}Cr")
     log(f"  Cache : {os.path.abspath(CACHE_DIR)}  |  Live TTL: {LIVE_TTL_SEC}s")
     log("=" * 65)
@@ -351,8 +369,8 @@ def scan():
     symbols   = [s["symbol"] for s in oi_stocks]
     oi_map    = {s["symbol"]: s for s in oi_stocks}
 
-    # Step 2 — Angel One live quotes (returns both price_changes and ltps)
-    price_changes, ltps = get_price_changes(symbols, trade_date)
+    # Step 2 — Angel One live quotes
+    price_changes, ltps, volumes = get_price_changes(symbols, trade_date)
 
     # Update spot_price with live LTP for accurate entry price
     for sym in symbols:
@@ -375,9 +393,26 @@ def scan():
             long_buildup.append({**oi_map[sym], "price_chg": price_chg})
     log(f"  → {len(long_buildup)} long buildup stocks")
 
-    # Step 4 — Live option chain PCR (only for long buildup stocks)
-    lb_symbols  = [s["symbol"] for s in long_buildup]
-    lb_spot_map = {s["symbol"]: s.get("spot_price", 0) for s in long_buildup}
+    # Step 3b — Volume filter
+    lb_syms_vol  = [s["symbol"] for s in long_buildup]
+    avg_vols     = get_avg_volumes_data(lb_syms_vol, trade_date)
+    log(f"Step 3b — Volume filter (today >= {MIN_VOLUME_RATIO}x 20D avg)")
+    vol_passed = []
+    for stock in long_buildup:
+        sym       = stock["symbol"]
+        today_vol = volumes.get(sym, 0)
+        avg_vol   = avg_vols.get(sym, 0)
+        ratio     = round(today_vol / avg_vol, 2) if avg_vol > 0 else 0
+        passes    = ratio >= MIN_VOLUME_RATIO
+        marker    = "✓" if passes else " "
+        log(f"  {marker} {sym:<15} Vol: {today_vol:>10,}  Avg20D: {avg_vol:>10,}  {ratio:.2f}x")
+        if passes:
+            vol_passed.append({**stock, "vol_ratio": ratio})
+    log(f"  → {len(vol_passed)} stocks passed volume filter")
+
+    # Step 4 — Live option chain PCR (only for volume-confirmed stocks)
+    lb_symbols  = [s["symbol"] for s in vol_passed]
+    lb_spot_map = {s["symbol"]: s.get("spot_price", 0) for s in vol_passed}
     try:
         pcr_map, liquid_stocks = get_live_pcr_data(lb_symbols, lb_spot_map, trade_date)
     except Exception as e:
@@ -387,7 +422,7 @@ def scan():
     # Step 5 — PCR + liquidity filter
     log(f"Step 5 — PCR >= {MIN_PCR} + Liquid only")
     results = []
-    for stock in long_buildup:
+    for stock in vol_passed:
         sym     = stock["symbol"]
         pcr     = pcr_map.get(sym)
         liquid  = sym in liquid_stocks
@@ -415,11 +450,11 @@ def scan():
 
     if results:
         results_sorted = sorted(results, key=lambda x: x["oi_chg"], reverse=True)
-        print(f"\n{'#':<4} {'Symbol':<15} {'Spot Price':>10} {'Price Chg%':>11} {'OI Chg%':>10} {'PCR':>7}  {'Macro':>9}")
-        print("-" * 72)
+        print(f"\n{'#':<4} {'Symbol':<15} {'Spot Price':>10} {'Price Chg%':>11} {'OI Chg%':>10} {'Vol':>6} {'PCR':>7}  {'Macro':>9}")
+        print("-" * 80)
         for idx, r in enumerate(results_sorted, 1):
             macro_col = f"[{icon}] {sentiment}"
-            print(f"{idx:<4} {r['symbol']:<15} {r['spot_price']:>10.2f} {r['price_chg']:>+10.2f}% {r['oi_chg']:>+9.2f}% {r['pcr']:>7.2f}  {macro_col}")
+            print(f"{idx:<4} {r['symbol']:<15} {r['spot_price']:>10.2f} {r['price_chg']:>+10.2f}% {r['oi_chg']:>+9.2f}% {r.get('vol_ratio', 0):>5.1f}x {r['pcr']:>7.2f}  {macro_col}")
         print()
         log(f"Total matched: {len(results)} stocks  |  FII 5D Net: ₹{macro['fii_nd_net']:+,.2f} Cr  [{icon}] {sentiment}")
     else:
@@ -429,7 +464,7 @@ def scan():
         "scan_time": datetime.now().isoformat(),
         "criteria": {"min_oi_chg_pct": MIN_OI_CHANGE_PCT, "min_pcr": MIN_PCR},
         "macro":    {"sentiment": sentiment, "fii_5d_net_cr": macro["fii_nd_net"], "days": macro["days"], "history": macro["records"]},
-        "summary":  {"oi_spurt_stocks": len(oi_stocks), "long_buildup": len(long_buildup), "matched": len(results)},
+        "summary":  {"oi_spurt_stocks": len(oi_stocks), "long_buildup": len(long_buildup), "vol_passed": len(vol_passed), "matched": len(results)},
         "results":  results,
     }
     with open("scan_results.json", "w") as f:
