@@ -2,8 +2,7 @@ name: Auto Trader — Daily Run
 
 on:
   schedule:
-    # Every 5 minutes (change to '45 9 * * 1-5' for 3:15 PM IST daily)
-    - cron: '*/5 * * * *'
+    - cron: '45 9 * * 1-5'   # 3:15 PM IST, Mon–Fri
   workflow_dispatch:   # manual trigger from GitHub UI
 
 permissions:
