@@ -1,0 +1,17 @@
+[Unit]
+Description=Auto Trader Bot
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/auto-trader
+EnvironmentFile=/home/ubuntu/auto-trader/.env
+ExecStart=/home/ubuntu/auto-trader/venv/bin/python3 run_bot.py
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

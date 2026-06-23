@@ -1,9 +1,7 @@
 name: Auto Trader — Daily Run
 
 on:
-  schedule:
-    - cron: '45 9 * * 1-5'   # 3:15 PM IST, Mon–Fri
-  workflow_dispatch:   # manual trigger from GitHub UI
+  workflow_dispatch:   # manual trigger only — bot runs on Oracle Cloud VM
 
 permissions:
   contents: write      # needed to push portfolio + results back to repo
