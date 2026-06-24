@@ -127,18 +127,32 @@ def generate_excel(portfolio, all_prices):
 
     with pd.ExcelWriter(EXCEL_FILE, engine="openpyxl") as writer:
 
-        # ── Sheet 1: All Trades ───────────────────────────────────────────────
-        if trades:
-            df = pd.DataFrame(trades)[
-                ["symbol", "entry_date", "exit_date", "entry_price",
-                 "exit_price", "quantity", "pnl_abs", "pnl_pct", "reason", "macro_entry"]
-            ].copy()
-            df.columns = ["Symbol", "Entry Date", "Exit Date", "Entry ₹",
-                          "Exit ₹", "Qty", "P&L ₹", "P&L %", "Exit Reason", "Macro"]
-            df.sort_values("Exit Date", ascending=False, inplace=True)
-        else:
-            df = pd.DataFrame(columns=["Symbol", "Entry Date", "Exit Date", "Entry ₹",
-                                        "Exit ₹", "Qty", "P&L ₹", "P&L %", "Exit Reason", "Macro"])
+        # ── Sheet 1: All Trades (closed + open) ──────────────────────────────
+        closed_rows = []
+        for t in trades:
+            closed_rows.append({
+                "Symbol": t["symbol"], "Entry Date": t["entry_date"],
+                "Exit Date": t["exit_date"], "Entry ₹": t["entry_price"],
+                "Exit ₹": t["exit_price"], "Qty": t["quantity"],
+                "P&L ₹": t["pnl_abs"], "P&L %": t["pnl_pct"],
+                "Status": "CLOSED", "Exit Reason": t["reason"], "Macro": t.get("macro_entry", "?"),
+            })
+        open_rows = []
+        for sym, pos in positions.items():
+            curr    = all_prices.get(sym) or pos["entry_price"]
+            pnl     = round((curr - pos["entry_price"]) * pos["quantity"], 2)
+            pnl_pct = round((curr - pos["entry_price"]) / pos["entry_price"] * 100, 2)
+            open_rows.append({
+                "Symbol": sym, "Entry Date": pos["entry_date"],
+                "Exit Date": "-", "Entry ₹": pos["entry_price"],
+                "Exit ₹": curr, "Qty": pos["quantity"],
+                "P&L ₹": pnl, "P&L %": pnl_pct,
+                "Status": "OPEN", "Exit Reason": "-", "Macro": pos.get("macro_entry", "?"),
+            })
+        all_rows = open_rows + closed_rows
+        df = pd.DataFrame(all_rows, columns=["Symbol", "Entry Date", "Exit Date", "Entry ₹",
+                                              "Exit ₹", "Qty", "P&L ₹", "P&L %",
+                                              "Status", "Exit Reason", "Macro"])
         df.to_excel(writer, sheet_name="All Trades", index=False)
 
         # ── Sheet 2: Open Positions ───────────────────────────────────────────
