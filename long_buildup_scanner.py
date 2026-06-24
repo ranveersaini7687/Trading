@@ -33,11 +33,9 @@ CACHE_DIR         = "cache"
 MAX_RETRIES       = 3
 RETRY_DELAY_SEC   = 3
 
-# FII macro sentiment thresholds (₹ Crore, rolling 5-day net)
-FII_LOOKBACK_DAYS  = 5
-FII_BEARISH_THRESH = -3000   # sold > 3000 Cr → BEARISH (block longs)
-FII_CAUTIOUS_THRESH = -1500  # sold 1500-3000 Cr → CAUTIOUS (warn)
-FII_BULLISH_THRESH  =  1500  # bought > 1500 Cr → BULLISH
+# Combined FII+DII institutional flow thresholds (₹ Crore, today's total net)
+INST_BULLISH_THRESH =  500   # total net buy > 500 Cr → BULLISH
+INST_BEARISH_THRESH = -500   # total net sell > 500 Cr → BEARISH (block longs)
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -210,8 +208,17 @@ def get_fii_dii_data(session, trade_date):
     if os.path.exists(cache_file):
         with open(cache_file) as f:
             data = json.load(f)
-        log(f"  → FII net: ₹{data.get('fii_net', 0):+,.2f} Cr  DII net: ₹{data.get('dii_net', 0):+,.2f} Cr (cached)")
-        return data
+        # handle old nested format {"ts": ..., "data": {...}}
+        if "data" in data and "ts" in data:
+            data = data["data"]
+        fii_net = data.get("fii_net", 0)
+        dii_net = data.get("dii_net", 0)
+        # re-fetch if values look stale (both zero means old bad cache)
+        if fii_net == 0 and dii_net == 0:
+            log("  → Cache looks stale, re-fetching...")
+        else:
+            log(f"  → FII net: ₹{fii_net:+,.2f} Cr  DII net: ₹{dii_net:+,.2f} Cr (cached)")
+            return data
     data = _fetch_fii_dii(session)
     with open(cache_file, "w") as f:
         json.dump(data, f)
@@ -219,36 +226,28 @@ def get_fii_dii_data(session, trade_date):
     return data
 
 
-def compute_fii_sentiment(lookback_days=FII_LOOKBACK_DAYS):
-    """Read the last N fii_dii_*.json cache files and compute rolling FII net sentiment."""
-    if not os.path.isdir(CACHE_DIR):
-        return {"sentiment": "UNKNOWN", "fii_nd_net": 0.0, "days": 0, "records": []}
-
-    files = sorted(
-        [f for f in os.listdir(CACHE_DIR) if f.startswith("fii_dii_") and f.endswith(".json")],
-        reverse=True,
-    )[:lookback_days]
-
-    if not files:
-        return {"sentiment": "UNKNOWN", "fii_nd_net": 0.0, "days": 0, "records": []}
-
-    total, records = 0.0, []
-    for fname in files:
-        with open(os.path.join(CACHE_DIR, fname)) as f:
-            data = json.load(f)
-        fii_net = float(data.get("fii_net", 0) or 0)
-        dii_net = float(data.get("dii_net", 0) or 0)
-        total  += fii_net
-        records.append({"date": data.get("date", fname[8:16]), "fii_net": fii_net, "dii_net": dii_net})
-
-    n = len(records)
-    label = (
-        "BEARISH"  if total <= FII_BEARISH_THRESH  else
-        "CAUTIOUS" if total <= FII_CAUTIOUS_THRESH else
-        "BULLISH"  if total >= FII_BULLISH_THRESH  else
+def get_inst_macro_signal(fii_dii):
+    """Combined FII+DII total buy vs sell → BULLISH / NEUTRAL / BEARISH."""
+    fii_buy  = float(fii_dii.get("fii_buy",  0) or 0)
+    fii_sell = float(fii_dii.get("fii_sell", 0) or 0)
+    dii_buy  = float(fii_dii.get("dii_buy",  0) or 0)
+    dii_sell = float(fii_dii.get("dii_sell", 0) or 0)
+    total_buy  = fii_buy  + dii_buy
+    total_sell = fii_sell + dii_sell
+    total_net  = total_buy - total_sell
+    sentiment  = (
+        "BULLISH" if total_net >= INST_BULLISH_THRESH else
+        "BEARISH" if total_net <= INST_BEARISH_THRESH else
         "NEUTRAL"
     )
-    return {"sentiment": label, "fii_nd_net": round(total, 2), "days": n, "records": records}
+    return {
+        "sentiment":  sentiment,
+        "total_buy":  round(total_buy,  2),
+        "total_sell": round(total_sell, 2),
+        "total_net":  round(total_net,  2),
+        "fii_net":    round(fii_buy - fii_sell, 2),
+        "dii_net":    round(dii_buy - dii_sell, 2),
+    }
 
 
 # ── Main scan ─────────────────────────────────────────────────────────────────
@@ -259,29 +258,31 @@ def scan():
     log("  AUTO TRADER — Long Buildup Scanner")
     log(f"  Date  : {datetime.now().strftime('%d %b %Y %H:%M IST')}")
     log(f"  Filter: Price UP + OI >= +{MIN_OI_CHANGE_PCT}% + Vol >= {MIN_VOLUME_RATIO}x + EMA {'/'.join(str(p) for p in EMA_PERIODS)} stack + PCR >= {MIN_PCR}")
-    log(f"  Macro : FII {FII_LOOKBACK_DAYS}-day rolling  |  BEARISH<{FII_BEARISH_THRESH}Cr, CAUTIOUS<{FII_CAUTIOUS_THRESH}Cr")
+    log(f"  Macro : FII+DII combined net  |  BULLISH>+{INST_BULLISH_THRESH}Cr, BEARISH<{INST_BEARISH_THRESH}Cr (blocks longs)")
     log("=" * 65)
 
     session = init_session()
 
-    # Step 7 — FII/DII (cached per day; used for rolling 5-day sentiment)
+    # Step 7 — FII/DII (today's combined institutional flow)
+    fii_dii_data = {}
     try:
-        get_fii_dii_data(session, trade_date)
+        fii_dii_data = get_fii_dii_data(session, trade_date)
     except Exception as e:
-        log(f"  !! FII/DII fetch failed: {e} — macro will use cached history only")
+        log(f"  !! FII/DII fetch failed: {e} — macro defaulting to NEUTRAL")
 
-    macro = compute_fii_sentiment(FII_LOOKBACK_DAYS)
-    log(f"\n  ── FII Macro ({macro['days']}-day rolling) ──")
-    for rec in macro["records"]:
-        bar  = "▼" if rec["fii_net"] < 0 else "▲"
-        sign = "+" if rec["fii_net"] >= 0 else ""
-        log(f"     {rec['date']}  FII: {sign}{rec['fii_net']:>9,.2f} Cr  DII: {'+' if rec['dii_net'] >= 0 else ''}{rec['dii_net']:>9,.2f} Cr  {bar}")
-    log(f"  ── {macro['days']}D FII Net: ₹{macro['fii_nd_net']:+,.2f} Cr  →  Sentiment: {macro['sentiment']} ──\n")
+    macro = get_inst_macro_signal(fii_dii_data)
+    MACRO_ICON = {"BULLISH": "▲", "NEUTRAL": "─", "BEARISH": "▼"}
+    icon = MACRO_ICON.get(macro["sentiment"], "?")
+
+    log(f"\n  ── Institutional Flow (Today) ──")
+    log(f"     FII   Buy: ₹{fii_dii_data.get('fii_buy', 0):>10,.2f} Cr   Sell: ₹{fii_dii_data.get('fii_sell', 0):>10,.2f} Cr   Net: ₹{macro['fii_net']:>+10,.2f} Cr")
+    log(f"     DII   Buy: ₹{fii_dii_data.get('dii_buy', 0):>10,.2f} Cr   Sell: ₹{fii_dii_data.get('dii_sell', 0):>10,.2f} Cr   Net: ₹{macro['dii_net']:>+10,.2f} Cr")
+    log(f"     ─────────────────────────────────────────────────────────────────")
+    log(f"     TOTAL Buy: ₹{macro['total_buy']:>10,.2f} Cr   Sell: ₹{macro['total_sell']:>10,.2f} Cr   Net: ₹{macro['total_net']:>+10,.2f} Cr")
+    log(f"  ── Macro Signal: [{icon}] {macro['sentiment']} ──\n")
 
     if macro["sentiment"] == "BEARISH":
-        log("  *** MACRO ALERT: FII aggressively SELLING — HIGH risk of false long signals ***")
-    elif macro["sentiment"] == "CAUTIOUS":
-        log("  **  MACRO CAUTION: FII net selling — verify each trade carefully  **")
+        log("  *** MACRO BLOCK: Institutions net SELLING — no new longs today ***")
 
     # Step 1
     oi_stocks = get_oi_spurt_stocks(session)
@@ -379,17 +380,19 @@ def scan():
             if not liquid: reasons.append("illiquid")
             log(f"     {sym:<15} PCR: {pcr_str}  liquid: {'yes' if liquid else 'no '}  → {', '.join(reasons)}")
 
-    # ── Results table ──────────────────────────────────────────────────────────
-    MACRO_ICON = {"BULLISH": "▲", "NEUTRAL": "─", "CAUTIOUS": "!", "BEARISH": "▼", "UNKNOWN": "?"}
-    sentiment  = macro["sentiment"]
-    icon       = MACRO_ICON.get(sentiment, "?")
+    # ── Macro block — clear results if institutions are net sellers ────────────
+    sentiment = macro["sentiment"]
+    if sentiment == "BEARISH":
+        log(f"\n  *** MACRO BLOCK: Combined institutional net ₹{macro['total_net']:+,.0f} Cr → no new longs entered ***")
+        results = []
 
+    # ── Results table ──────────────────────────────────────────────────────────
     log("\n" + "=" * 92)
-    log(f"  RESULTS — Long Buildup + PCR >= {MIN_PCR}  |  {datetime.now().strftime('%d %b %Y')}  |  FII Macro: [{icon}] {sentiment}")
+    log(f"  RESULTS — Long Buildup + PCR >= {MIN_PCR}  |  {datetime.now().strftime('%d %b %Y')}  |  Macro: [{icon}] {sentiment}  Net: ₹{macro['total_net']:+,.0f} Cr")
     log("=" * 92)
 
-    if macro["sentiment"] in ("BEARISH", "CAUTIOUS"):
-        log(f"  ⚠  FII sold ₹{abs(macro['fii_nd_net']):,.0f} Cr over {macro['days']} days — treat these as HIGH RISK longs")
+    if sentiment == "NEUTRAL":
+        log(f"  ~  Institutions near neutral (₹{macro['total_net']:+,.0f} Cr) — proceed with caution")
 
     if results:
         results_sorted = sorted(results, key=lambda x: x["oi_chg"], reverse=True)
@@ -399,14 +402,14 @@ def scan():
             macro_col = f"[{icon}] {sentiment}"
             print(f"{idx:<4} {r['symbol']:<15} {r['spot_price']:>10.2f} {r['price_chg']:>+10.2f}% {r['oi_chg']:>+9.2f}% {r.get('vol_ratio', 0):>5.1f}x {r['pcr']:>7.2f}  {macro_col}")
         print()
-        log(f"Total matched: {len(results)} stocks  |  FII {macro['days']}D Net: ₹{macro['fii_nd_net']:+,.2f} Cr  [{icon}] {sentiment}")
+        log(f"Total matched: {len(results)} stocks  |  Inst Net: ₹{macro['total_net']:+,.0f} Cr  [{icon}] {sentiment}")
     else:
-        log("No stocks matched the criteria.")
+        log("No stocks matched the criteria." if sentiment != "BEARISH" else "Longs blocked by macro filter.")
 
     output = {
         "scan_time": datetime.now().isoformat(),
         "criteria": {"min_oi_chg_pct": MIN_OI_CHANGE_PCT, "min_pcr": MIN_PCR},
-        "macro":    {"sentiment": sentiment, "fii_5d_net_cr": macro["fii_nd_net"], "days": macro["days"], "history": macro["records"]},
+        "macro":    {"sentiment": sentiment, "total_buy_cr": macro["total_buy"], "total_sell_cr": macro["total_sell"], "total_net_cr": macro["total_net"], "fii_net_cr": macro["fii_net"], "dii_net_cr": macro["dii_net"]},
         "summary":  {"oi_spurt_stocks": len(oi_stocks), "long_buildup": len(long_buildup), "vol_passed": len(vol_passed), "ema_passed": len(ema_passed), "matched": len(results)},
         "results":  results,
     }
