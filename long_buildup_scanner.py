@@ -1,19 +1,14 @@
 #!/usr/bin/env python3
 """
 Auto Trader - Long Buildup Scanner
-Each step fetches data, caches it to disk, and retries up to 3 times on failure.
-On subsequent iterations the cached copy is returned instantly without re-fetching.
-
-Cache lives in ./cache/ — keyed by step + trade date.
-TTL: OI / prices = 5 min (live); Bhav copy / market cap = full day (date-keyed).
+Fetches fresh data on every run — no caching.
 """
 
+import os
 import requests
 import time
 import json
-import os
 import functools
-import pandas as pd
 from datetime import datetime
 from angel_api import AngelOneAPI
 
@@ -35,13 +30,12 @@ MIN_VOLUME_RATIO  = 1.5   # today's volume must be >= 1.5× 20-day average
 EMA_PERIODS       = (9, 21, 50)   # bullish stack: price > 9 EMA > 21 EMA > 50 EMA
 SKIP_SYMBOLS      = {"NIFTY", "FINNIFTY", "BANKNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "NIFTYNXT50"}
 CACHE_DIR         = "cache"
-LIVE_TTL_SEC      = 300   # 5 min for intraday data (OI spurts, prices)
 MAX_RETRIES       = 3
 RETRY_DELAY_SEC   = 3
 
 # FII macro sentiment thresholds (₹ Crore, rolling 5-day net)
 FII_LOOKBACK_DAYS  = 5
-FII_BEARISH_THRESH = -3000   # sold > 3000 Cr → BEARISH  (block longs)
+FII_BEARISH_THRESH = -3000   # sold > 3000 Cr → BEARISH (block longs)
 FII_CAUTIOUS_THRESH = -1500  # sold 1500-3000 Cr → CAUTIOUS (warn)
 FII_BULLISH_THRESH  =  1500  # bought > 1500 Cr → BULLISH
 
@@ -70,60 +64,6 @@ def retry(func):
                     log(f"  !! [{func.__name__}] all {MAX_RETRIES} attempts failed: {e}")
         raise last_err
     return wrapper
-
-
-# ── Cache helpers ─────────────────────────────────────────────────────────────
-os.makedirs(CACHE_DIR, exist_ok=True)
-
-
-def _cache_path(key):
-    return os.path.join(CACHE_DIR, f"{key}.json")
-
-
-def cache_load(key, ttl_sec=None):
-    """
-    Return cached value for key, or None if missing / expired.
-    ttl_sec=None means date-keyed (valid all day — key already contains the date).
-    """
-    path = _cache_path(key)
-    if not os.path.exists(path):
-        return None
-    with open(path) as f:
-        entry = json.load(f)
-    if ttl_sec is not None:
-        age = time.time() - entry.get("ts", 0)
-        if age > ttl_sec:
-            log(f"  [cache] {key}: expired ({age:.0f}s > {ttl_sec}s TTL)")
-            return None
-    log(f"  [cache] {key}: HIT")
-    return entry["data"]
-
-
-def cache_save(key, data):
-    path = _cache_path(key)
-    with open(path, "w") as f:
-        json.dump({"ts": time.time(), "data": data}, f)
-    log(f"  [cache] {key}: saved")
-
-
-# ── Cache cleanup ─────────────────────────────────────────────────────────────
-def cleanup_old_cache(days=30):
-    """Delete cache files not modified in the last `days` days."""
-    cutoff = time.time() - days * 86400
-    removed, total = 0, 0
-    for fname in os.listdir(CACHE_DIR):
-        if not fname.endswith(".json"):
-            continue
-        total += 1
-        fpath = os.path.join(CACHE_DIR, fname)
-        if os.stat(fpath).st_mtime < cutoff:
-            os.remove(fpath)
-            removed += 1
-            log(f"  [cache] deleted old file: {fname}")
-    if removed:
-        log(f"  [cache cleanup] removed {removed}/{total} files older than {days} days")
-    else:
-        log(f"  [cache cleanup] {total} files checked, none older than {days} days")
 
 
 # ── NSE session ───────────────────────────────────────────────────────────────
@@ -163,35 +103,20 @@ def _fetch_oi_spurts(session):
     return stocks
 
 
-def get_oi_spurt_stocks(session, trade_date):
+def get_oi_spurt_stocks(session):
     log("Step 1 — OI spurt stocks (NSE)")
-    key = f"oi_spurts_{trade_date}"
-    cached = cache_load(key, ttl_sec=LIVE_TTL_SEC)
-    if cached is not None:
-        log(f"  → {len(cached)} stocks (from cache)")
-        return cached
     stocks = _fetch_oi_spurts(session)
-    cache_save(key, stocks)
     log(f"  → {len(stocks)} F&O stocks with OI UP | {stocks[0]['nse_ts'] if stocks else ''}")
     return stocks
 
 
 # ── Step 2: Live quotes (Angel One) ──────────────────────────────────────────
-def get_price_changes(symbols, trade_date):
+def get_price_changes(symbols):
     """
     Returns ({symbol: price_chg_pct}, {symbol: ltp}, {symbol: volume}).
     Uses Angel One SmartAPI for live LTP + previous close + today's volume.
     """
     log(f"Step 2 — Live quotes for {len(symbols)} stocks (Angel One)")
-    key = f"price_changes_{trade_date}"
-    cached = cache_load(key, ttl_sec=LIVE_TTL_SEC)
-    if cached is not None:
-        changes = cached.get("changes", {})
-        ltps    = cached.get("ltps", {})
-        volumes = cached.get("volumes", {})
-        log(f"  → {sum(v is not None for v in changes.values())} stocks (from cache)")
-        return changes, ltps, volumes
-
     try:
         quotes = angel.get_quotes(symbols)
     except Exception as e:
@@ -210,62 +135,44 @@ def get_price_changes(symbols, trade_date):
             ltps[sym]    = None
             volumes[sym] = 0
 
-    cache_save(key, {"changes": changes, "ltps": ltps, "volumes": volumes})
     valid = sum(v is not None for v in changes.values())
     log(f"  → Live quotes fetched for {valid}/{len(symbols)} stocks")
     return changes, ltps, volumes
 
 
 # ── Step 3b: 20-day average volume ───────────────────────────────────────────
-def get_avg_volumes_data(symbols, trade_date):
+def get_avg_volumes_data(symbols):
     log(f"Step 3b — 20-day avg volumes for {len(symbols)} stocks (Angel One)")
-    key    = f"avg_volumes_{trade_date}"
-    cached = cache_load(key)   # date-keyed, valid all day
-    if cached is not None:
-        log(f"  → {len(cached)} avg volumes (from cache)")
-        return cached
+    if not symbols:
+        return {}
     avg_vols = angel.get_avg_volumes(symbols)
-    cache_save(key, avg_vols)
     log(f"  → Avg volumes fetched for {len(avg_vols)} stocks")
     return avg_vols
 
 
 # ── Step 3c: EMA stack ────────────────────────────────────────────────────────
-def get_ema_stack_data(symbols, trade_date):
+def get_ema_stack_data(symbols):
     log(f"Step 3c — EMA stack ({'/'.join(str(p) for p in EMA_PERIODS)}) for {len(symbols)} stocks")
-    key    = f"ema_stack_{trade_date}"
-    cached = cache_load(key)   # date-keyed, valid all day
-    if cached is not None:
-        log(f"  → {len(cached)} EMA entries (from cache)")
-        return cached
+    if not symbols:
+        return {}
     ema_data = angel.get_ema_stack(symbols)
-    cache_save(key, ema_data)
     log(f"  → EMA stack computed for {len(ema_data)} stocks")
     return ema_data
 
 
 # ── Step 4: Live option chain — PCR + liquidity (Angel One NFO) ──────────────
-def get_live_pcr_data(symbols, spot_prices, trade_date):
+def get_live_pcr_data(symbols):
     """
-    Fetch live PCR + liquidity for each symbol via Angel One NFO option data.
-    spot_prices: {symbol: ltp} — needed to filter ATM ±15% strikes.
+    Fetch live PCR for each symbol via Angel One NFO option chain (all strikes, near expiry).
     Returns ({symbol: pcr}, {symbol: is_liquid}).
     """
     log(f"Step 4 — Live option chain PCR for {len(symbols)} stocks (Angel One NFO)")
-    key    = f"live_pcr_{trade_date}"
-    cached = cache_load(key, ttl_sec=LIVE_TTL_SEC)
-    if cached is not None:
-        log(f"  → {len(cached['pcr_map'])} PCR entries (from cache)")
-        return cached["pcr_map"], set(cached["liquid_stocks"])
-
+    if not symbols:
+        return {}, set()
     pcr_map, liquid_stocks = {}, set()
     for sym in symbols:
-        spot = spot_prices.get(sym) or 0
-        if not spot:
-            log(f"  {sym}: no spot price — skipping PCR")
-            continue
         try:
-            pcr, liquid = angel.get_pcr(sym, spot)
+            pcr, liquid = angel.get_pcr(sym)
             if pcr is not None:
                 pcr_map[sym] = pcr
             if liquid:
@@ -273,10 +180,8 @@ def get_live_pcr_data(symbols, spot_prices, trade_date):
         except Exception as e:
             log(f"  !! {sym}: Angel One PCR failed — {e}")
 
-    cache_save(key, {"pcr_map": pcr_map, "liquid_stocks": list(liquid_stocks)})
     log(f"  → PCR fetched for {len(pcr_map)}/{len(symbols)} stocks  |  {len(liquid_stocks)} liquid")
     return pcr_map, liquid_stocks
-
 
 
 # ── Step 7: FII/DII flow data ─────────────────────────────────────────────────
@@ -300,22 +205,25 @@ def _fetch_fii_dii(session):
 
 def get_fii_dii_data(session, trade_date):
     log("Step 7 — FII/DII institutional flow (NSE)")
-    key = f"fii_dii_{trade_date}"
-    cached = cache_load(key)   # date-keyed, no TTL (stable once market closes)
-    if cached is not None:
-        log(f"  → FII net: ₹{cached.get('fii_net', 0):+,.2f} Cr  DII net: ₹{cached.get('dii_net', 0):+,.2f} Cr (cache)")
-        return cached
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    cache_file = os.path.join(CACHE_DIR, f"fii_dii_{trade_date}.json")
+    if os.path.exists(cache_file):
+        with open(cache_file) as f:
+            data = json.load(f)
+        log(f"  → FII net: ₹{data.get('fii_net', 0):+,.2f} Cr  DII net: ₹{data.get('dii_net', 0):+,.2f} Cr (cached)")
+        return data
     data = _fetch_fii_dii(session)
-    cache_save(key, data)
+    with open(cache_file, "w") as f:
+        json.dump(data, f)
     log(f"  → FII net: ₹{data.get('fii_net', 0):+,.2f} Cr  DII net: ₹{data.get('dii_net', 0):+,.2f} Cr")
     return data
 
 
-def compute_fii_sentiment(lookback_days=5):
-    """
-    Read the last N fii_dii_*.json cache files and compute rolling FII net sentiment.
-    Returns: dict with sentiment label, 5-day sum, and per-day records.
-    """
+def compute_fii_sentiment(lookback_days=FII_LOOKBACK_DAYS):
+    """Read the last N fii_dii_*.json cache files and compute rolling FII net sentiment."""
+    if not os.path.isdir(CACHE_DIR):
+        return {"sentiment": "UNKNOWN", "fii_nd_net": 0.0, "days": 0, "records": []}
+
     files = sorted(
         [f for f in os.listdir(CACHE_DIR) if f.startswith("fii_dii_") and f.endswith(".json")],
         reverse=True,
@@ -327,8 +235,7 @@ def compute_fii_sentiment(lookback_days=5):
     total, records = 0.0, []
     for fname in files:
         with open(os.path.join(CACHE_DIR, fname)) as f:
-            entry = json.load(f)
-        data    = entry.get("data", entry)   # unwrap cache wrapper
+            data = json.load(f)
         fii_net = float(data.get("fii_net", 0) or 0)
         dii_net = float(data.get("dii_net", 0) or 0)
         total  += fii_net
@@ -353,14 +260,11 @@ def scan():
     log(f"  Date  : {datetime.now().strftime('%d %b %Y %H:%M IST')}")
     log(f"  Filter: Price UP + OI >= +{MIN_OI_CHANGE_PCT}% + Vol >= {MIN_VOLUME_RATIO}x + EMA {'/'.join(str(p) for p in EMA_PERIODS)} stack + PCR >= {MIN_PCR}")
     log(f"  Macro : FII {FII_LOOKBACK_DAYS}-day rolling  |  BEARISH<{FII_BEARISH_THRESH}Cr, CAUTIOUS<{FII_CAUTIOUS_THRESH}Cr")
-    log(f"  Cache : {os.path.abspath(CACHE_DIR)}  |  Live TTL: {LIVE_TTL_SEC}s")
     log("=" * 65)
-
-    cleanup_old_cache(days=30)
 
     session = init_session()
 
-    # Step 7 — FII/DII (run first; builds rolling cache before sentiment check)
+    # Step 7 — FII/DII (cached per day; used for rolling 5-day sentiment)
     try:
         get_fii_dii_data(session, trade_date)
     except Exception as e:
@@ -372,7 +276,7 @@ def scan():
         bar  = "▼" if rec["fii_net"] < 0 else "▲"
         sign = "+" if rec["fii_net"] >= 0 else ""
         log(f"     {rec['date']}  FII: {sign}{rec['fii_net']:>9,.2f} Cr  DII: {'+' if rec['dii_net'] >= 0 else ''}{rec['dii_net']:>9,.2f} Cr  {bar}")
-    log(f"  ── 5D FII Net: ₹{macro['fii_nd_net']:+,.2f} Cr  →  Sentiment: {macro['sentiment']} ──\n")
+    log(f"  ── {macro['days']}D FII Net: ₹{macro['fii_nd_net']:+,.2f} Cr  →  Sentiment: {macro['sentiment']} ──\n")
 
     if macro["sentiment"] == "BEARISH":
         log("  *** MACRO ALERT: FII aggressively SELLING — HIGH risk of false long signals ***")
@@ -380,12 +284,12 @@ def scan():
         log("  **  MACRO CAUTION: FII net selling — verify each trade carefully  **")
 
     # Step 1
-    oi_stocks = get_oi_spurt_stocks(session, trade_date)
+    oi_stocks = get_oi_spurt_stocks(session)
     symbols   = [s["symbol"] for s in oi_stocks]
     oi_map    = {s["symbol"]: s for s in oi_stocks}
 
     # Step 2 — Angel One live quotes
-    price_changes, ltps, volumes = get_price_changes(symbols, trade_date)
+    price_changes, ltps, volumes = get_price_changes(symbols)
 
     # Update spot_price with live LTP for accurate entry price
     for sym in symbols:
@@ -410,7 +314,7 @@ def scan():
 
     # Step 3b — Volume filter
     lb_syms_vol  = [s["symbol"] for s in long_buildup]
-    avg_vols     = get_avg_volumes_data(lb_syms_vol, trade_date)
+    avg_vols     = get_avg_volumes_data(lb_syms_vol)
     log(f"Step 3b — Volume filter (today >= {MIN_VOLUME_RATIO}x 20D avg)")
     vol_passed = []
     for stock in long_buildup:
@@ -427,7 +331,7 @@ def scan():
 
     # Step 3c — EMA stack filter
     ema_syms  = [s["symbol"] for s in vol_passed]
-    ema_data  = get_ema_stack_data(ema_syms, trade_date)
+    ema_data  = get_ema_stack_data(ema_syms)
     log(f"Step 3c — EMA stack filter (Price > 9EMA > 21EMA > 50EMA)")
     ema_passed = []
     for stock in vol_passed:
@@ -446,9 +350,8 @@ def scan():
 
     # Step 4 — Live option chain PCR (only for EMA-confirmed stocks)
     lb_symbols  = [s["symbol"] for s in ema_passed]
-    lb_spot_map = {s["symbol"]: s.get("spot_price", 0) for s in ema_passed}
     try:
-        pcr_map, liquid_stocks = get_live_pcr_data(lb_symbols, lb_spot_map, trade_date)
+        pcr_map, liquid_stocks = get_live_pcr_data(lb_symbols)
     except Exception as e:
         log(f"  !! Option chain fetch failed: {e}")
         pcr_map, liquid_stocks = {}, set()
@@ -490,7 +393,7 @@ def scan():
             macro_col = f"[{icon}] {sentiment}"
             print(f"{idx:<4} {r['symbol']:<15} {r['spot_price']:>10.2f} {r['price_chg']:>+10.2f}% {r['oi_chg']:>+9.2f}% {r.get('vol_ratio', 0):>5.1f}x {r['pcr']:>7.2f}  {macro_col}")
         print()
-        log(f"Total matched: {len(results)} stocks  |  FII 5D Net: ₹{macro['fii_nd_net']:+,.2f} Cr  [{icon}] {sentiment}")
+        log(f"Total matched: {len(results)} stocks  |  FII {macro['days']}D Net: ₹{macro['fii_nd_net']:+,.2f} Cr  [{icon}] {sentiment}")
     else:
         log("No stocks matched the criteria.")
 

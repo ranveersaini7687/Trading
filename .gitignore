@@ -1,11 +1,18 @@
-# Transient cache — downloaded fresh each run
+# Runtime data — each environment has its own
+paper_portfolio.json
+scan_results.json
+trade_log.xlsx
+
+# Cache — all downloaded fresh each run except FII daily history
 cache/oi_spurts_*.json
 cache/price_changes_*.json
-
-# Keep these in git (rolling FII history + bhav copy + market caps)
-# cache/fii_dii_*.json       ← tracked
-# cache/bhavcopy_*.json      ← tracked
-# cache/market_cap_*.json    ← tracked
+cache/avg_volumes_*.json
+cache/ema_stack_*.json
+cache/live_pcr_*.json
+cache/scrip_tokens.json
+cache/scrip_nfo.json
+cache/bhavcopy_*.json
+cache/market_cap_*.json
 
 # Python
 __pycache__/

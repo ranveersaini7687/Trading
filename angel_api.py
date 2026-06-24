@@ -12,14 +12,12 @@ Required env vars:
 """
 
 import os
-import json
 import time
 import requests
 from datetime import date, datetime, timedelta
 
 ANGEL_BASE       = "https://apiconnect.angelone.in"
 SCRIP_MASTER_URL = "https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json"
-CACHE_DIR        = "cache"
 
 
 class AngelOneAPI:
@@ -78,25 +76,7 @@ class AngelOneAPI:
 
     # ── Scrip master ─────────────────────────────────────────────────────────
     def _load_scrip_master(self):
-        """
-        Load scrip master once daily.
-        Builds:
-          _token_map : NSE equity symbol -> token
-          _nfo_map   : stock name -> list of option instrument dicts
-        """
-        cache_file = os.path.join(CACHE_DIR, "scrip_tokens.json")
-        nfo_cache  = os.path.join(CACHE_DIR, "scrip_nfo.json")
-
-        if (os.path.exists(cache_file) and os.path.exists(nfo_cache) and
-                time.time() - os.path.getmtime(cache_file) < 86400):
-            with open(cache_file) as f:
-                self._token_map = json.load(f)
-            with open(nfo_cache) as f:
-                self._nfo_map = json.load(f)
-            print(f"  [angel] Scrip master: {len(self._token_map)} NSE  |  "
-                  f"{len(self._nfo_map)} NFO names (cache)")
-            return
-
+        """Download scrip master and build token maps."""
         print("  [angel] Downloading scrip master (~5 MB)...")
         resp = requests.get(SCRIP_MASTER_URL, timeout=60)
         resp.raise_for_status()
@@ -106,7 +86,7 @@ class AngelOneAPI:
         nfo_map   = {}
 
         for item in master:
-            seg  = item.get("exch_seg", "")
+            seg   = item.get("exch_seg", "")
             itype = item.get("instrumenttype", "")
 
             # NSE equities
@@ -132,15 +112,9 @@ class AngelOneAPI:
                         "optiontype": otype,
                     })
 
-        os.makedirs(CACHE_DIR, exist_ok=True)
-        with open(cache_file, "w") as f:
-            json.dump(token_map, f)
-        with open(nfo_cache, "w") as f:
-            json.dump(nfo_map, f)
-
         self._token_map = token_map
         self._nfo_map   = nfo_map
-        print(f"  [angel] Scrip master cached: {len(token_map)} NSE  |  {len(nfo_map)} NFO names")
+        print(f"  [angel] Scrip master loaded: {len(token_map)} NSE  |  {len(nfo_map)} NFO names")
 
     def _load_token_map(self):
         self._load_scrip_master()
@@ -207,13 +181,15 @@ class AngelOneAPI:
         if not self._token_map:
             self._load_scrip_master()
 
-        from_date = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d %H:%M")
+        from_date = (datetime.now() - timedelta(days=120)).strftime("%Y-%m-%d %H:%M")
         to_date   = datetime.now().strftime("%Y-%m-%d %H:%M")
         result    = {}
 
         for sym in symbols:
+            time.sleep(0.35)   # Angel One historical API rate limit
             token = self._token_map.get(sym)
             if not token:
+                print(f"  [angel] EMA: no token for {sym}")
                 result[sym] = {"ema9": None, "ema21": None, "ema50": None, "passes": False}
                 continue
             try:
@@ -233,6 +209,7 @@ class AngelOneAPI:
                 candles = resp.json().get("data", [])
                 closes  = [c[4] for c in candles if c[4] > 0]   # index 4 = close
                 if not closes:
+                    print(f"  [angel] EMA: no candle data returned for {sym} (token={token})")
                     result[sym] = {"ema9": None, "ema21": None, "ema50": None, "passes": False}
                     continue
                 price = closes[-1]   # latest close (today's)
@@ -244,7 +221,8 @@ class AngelOneAPI:
                     and price > ema9 > ema21 > ema50
                 )
                 result[sym] = {"ema9": ema9, "ema21": ema21, "ema50": ema50, "passes": passes}
-            except Exception:
+            except Exception as e:
+                print(f"  [angel] EMA fetch failed for {sym}: {e}")
                 result[sym] = {"ema9": None, "ema21": None, "ema50": None, "passes": False}
 
         return result
@@ -259,13 +237,15 @@ class AngelOneAPI:
         if not self._token_map:
             self._load_scrip_master()
 
-        from_date = (datetime.now() - timedelta(days=35)).strftime("%Y-%m-%d %H:%M")
+        from_date = (datetime.now() - timedelta(days=40)).strftime("%Y-%m-%d %H:%M")
         to_date   = datetime.now().strftime("%Y-%m-%d %H:%M")
         result    = {}
 
         for sym in symbols:
+            time.sleep(0.35)   # Angel One historical API rate limit
             token = self._token_map.get(sym)
             if not token:
+                print(f"  [angel] AvgVol: no token for {sym}")
                 result[sym] = 0
                 continue
             try:
@@ -286,13 +266,14 @@ class AngelOneAPI:
                 vols = [c[5] for c in candles[:-1] if c[5] > 0]  # exclude today's partial
                 vols = vols[-20:]
                 result[sym] = int(sum(vols) / len(vols)) if vols else 0
-            except Exception:
+            except Exception as e:
+                print(f"  [angel] AvgVol fetch failed for {sym}: {e}")
                 result[sym] = 0
 
         return result
 
     # ── NFO option chain PCR ──────────────────────────────────────────────────
-    def get_pcr(self, symbol, spot_price):
+    def get_pcr(self, symbol):
         """
         Calculate PCR and liquidity from Angel One NFO option chain data.
         Uses near-month expiry + ATM ±15% strikes.
@@ -313,15 +294,23 @@ class AngelOneAPI:
             except Exception:
                 return datetime.max
 
-        expiries    = sorted({i["expiry"] for i in instruments}, key=parse_expiry)
-        near_expiry = expiries[0] if expiries else None
+        expiries = sorted({i["expiry"] for i in instruments}, key=parse_expiry)
+        # Use the nearest expiry that hasn't already passed
+        today = datetime.now().date()
+        near_expiry = None
+        for exp in expiries:
+            exp_date = parse_expiry(exp).date()
+            if exp_date >= today:
+                near_expiry = exp
+                break
+        if not near_expiry:
+            near_expiry = expiries[0] if expiries else None
         if not near_expiry:
             return None, False
 
-        lower, upper = spot_price * 0.85, spot_price * 1.15
         near_opts = [
             i for i in instruments
-            if i["expiry"] == near_expiry and lower <= i["strike"] <= upper
+            if i["expiry"] == near_expiry
         ]
 
         if not near_opts:
