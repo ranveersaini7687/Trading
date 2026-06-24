@@ -321,9 +321,12 @@ def scan():
         sym       = stock["symbol"]
         today_vol = volumes.get(sym, 0)
         avg_vol   = avg_vols.get(sym, 0)
-        ratio     = round(today_vol / avg_vol, 2) if avg_vol > 0 else 0
-        passes    = ratio >= MIN_VOLUME_RATIO
-        marker    = "✓" if passes else " "
+        if avg_vol == 0:
+            log(f"     {sym:<15} Vol: {today_vol:>10,}  Avg20D:    no data  SKIP")
+            continue
+        ratio  = round(today_vol / avg_vol, 2)
+        passes = ratio >= MIN_VOLUME_RATIO
+        marker = "✓" if passes else " "
         log(f"  {marker} {sym:<15} Vol: {today_vol:>10,}  Avg20D: {avg_vol:>10,}  {ratio:.2f}x")
         if passes:
             vol_passed.append({**stock, "vol_ratio": ratio})
@@ -338,6 +341,9 @@ def scan():
         sym   = stock["symbol"]
         ed    = ema_data.get(sym, {})
         e9, e21, e50 = ed.get("ema9"), ed.get("ema21"), ed.get("ema50")
+        if e9 is None and e21 is None and e50 is None:
+            log(f"     {sym:<15} 9EMA:      N/A  21EMA:      N/A  50EMA:      N/A  SKIP")
+            continue
         ok    = ed.get("passes", False)
         marker = "✓" if ok else " "
         e9s   = f"{e9:.1f}"  if e9  else "N/A"
