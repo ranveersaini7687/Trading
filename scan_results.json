@@ -1,30 +1,136 @@
 {
-  "scan_time": "2026-06-23T00:21:26.367025",
+  "scan_time": "2026-06-25T16:47:35.123530",
   "criteria": {
     "min_oi_chg_pct": 2.0,
     "min_pcr": 0.8
   },
   "macro": {
     "sentiment": "NEUTRAL",
-    "fii_5d_net_cr": -1271.82,
-    "days": 2,
-    "history": [
-      {
-        "date": "22-Jun-2026",
-        "fii_net": -635.91,
-        "dii_net": 1035.72
-      },
-      {
-        "date": "22-Jun-2026",
-        "fii_net": -635.91,
-        "dii_net": 1035.72
-      }
-    ]
+    "total_buy_cr": 0.0,
+    "total_sell_cr": 0.0,
+    "total_net_cr": 0.0,
+    "fii_net_cr": 0.0,
+    "dii_net_cr": 0.0
   },
   "summary": {
-    "oi_spurt_stocks": 212,
-    "long_buildup": 42,
-    "matched": 0
+    "oi_spurt_stocks": 211,
+    "long_buildup": 69,
+    "vol_passed": 21,
+    "ema_passed": 15,
+    "matched": 8
   },
-  "results": []
+  "results": [
+    {
+      "symbol": "INDIGO",
+      "latest_oi": 198886,
+      "prev_oi": 160306,
+      "oi_chg": 24.07,
+      "spot_price": 5450.0,
+      "nse_ts": "25-Jun-2026 15:32:47",
+      "price_chg": 4.66,
+      "vol_ratio": 4.47,
+      "ema9": 5042.34,
+      "ema21": 4816.81,
+      "ema50": 4616.17,
+      "pcr": 0.85
+    },
+    {
+      "symbol": "GODREJPROP",
+      "latest_oi": 62660,
+      "prev_oi": 50979,
+      "oi_chg": 22.91,
+      "spot_price": 1850.6,
+      "nse_ts": "25-Jun-2026 15:32:47",
+      "price_chg": 1.65,
+      "vol_ratio": 1.78,
+      "ema9": 1794.23,
+      "ema21": 1764.59,
+      "ema50": 1732.46,
+      "pcr": 0.81
+    },
+    {
+      "symbol": "MAXHEALTH",
+      "latest_oi": 49330,
+      "prev_oi": 40838,
+      "oi_chg": 20.79,
+      "spot_price": 1123.35,
+      "nse_ts": "25-Jun-2026 15:32:47",
+      "price_chg": 3.85,
+      "vol_ratio": 1.61,
+      "ema9": 1074.43,
+      "ema21": 1045.55,
+      "ema50": 1024.17,
+      "pcr": 0.85
+    },
+    {
+      "symbol": "CHOLAFIN",
+      "latest_oi": 50184,
+      "prev_oi": 42028,
+      "oi_chg": 19.41,
+      "spot_price": 1799.2,
+      "nse_ts": "25-Jun-2026 15:32:47",
+      "price_chg": 0.35,
+      "vol_ratio": 2.24,
+      "ema9": 1708.68,
+      "ema21": 1638.07,
+      "ema50": 1587.05,
+      "pcr": 1.4
+    },
+    {
+      "symbol": "MOTHERSON",
+      "latest_oi": 51570,
+      "prev_oi": 43344,
+      "oi_chg": 18.98,
+      "spot_price": 151.71,
+      "nse_ts": "25-Jun-2026 15:32:47",
+      "price_chg": 4.93,
+      "vol_ratio": 3.24,
+      "ema9": 146.03,
+      "ema21": 143.13,
+      "ema50": 135.88,
+      "pcr": 0.8
+    },
+    {
+      "symbol": "UNITDSPR",
+      "latest_oi": 49295,
+      "prev_oi": 41583,
+      "oi_chg": 18.55,
+      "spot_price": 1384.9,
+      "nse_ts": "25-Jun-2026 15:32:47",
+      "price_chg": 1.9,
+      "vol_ratio": 2.08,
+      "ema9": 1334.96,
+      "ema21": 1309.55,
+      "ema50": 1302.04,
+      "pcr": 0.8
+    },
+    {
+      "symbol": "OFSS",
+      "latest_oi": 47117,
+      "prev_oi": 40651,
+      "oi_chg": 15.91,
+      "spot_price": 10974.5,
+      "nse_ts": "25-Jun-2026 15:32:47",
+      "price_chg": 4.83,
+      "vol_ratio": 3.59,
+      "ema9": 10033.17,
+      "ema21": 9790.78,
+      "ema50": 9139.28,
+      "pcr": 0.98
+    },
+    {
+      "symbol": "PAGEIND",
+      "latest_oi": 27928,
+      "prev_oi": 26095,
+      "oi_chg": 7.02,
+      "spot_price": 40950.0,
+      "nse_ts": "25-Jun-2026 15:32:47",
+      "price_chg": 0.16,
+      "vol_ratio": 2.29,
+      "ema9": 39928.61,
+      "ema21": 39130.2,
+      "ema50": 37526.24,
+      "pcr": 0.85
+    }
+  ]
 }

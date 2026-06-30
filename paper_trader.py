@@ -6,7 +6,7 @@ Capital  : ₹10,00,000
 Sizing   : ₹1,00,000 per trade  (max 10 positions)
 Stop-loss: -1%  from entry
 Target   : +2%  from entry
-Exit also: if stock falls out of scanner signals (long buildup gone)
+Exit only: SL hit or target hit
 
 Run daily:
   python3 long_buildup_scanner.py   → refresh signals
@@ -33,6 +33,27 @@ MAX_POSITIONS   = 10              # up to 10 slots × ₹1L
 ALLOC_PER_TRADE = 100_000         # ₹1,00,000 per trade
 STOP_LOSS_PCT   = 1.0             # -1%
 TARGET_PCT      = 2.0             # +2%
+MAX_PER_SECTOR  = 1               # max 1 stock per sector group
+
+# Broad sector groupings for concentration check
+SECTOR_MAP = {
+    "AUBANK":"BANK", "KOTAKBANK":"BANK", "HDFCBANK":"BANK", "ICICIBANK":"BANK",
+    "SBIN":"BANK", "BANKBARODA":"BANK", "BANKINDIA":"BANK", "PNB":"BANK",
+    "CANBK":"BANK", "FEDERALBNK":"BANK", "BANDHANBNK":"BANK", "INDUSINDBK":"BANK",
+    "YESBANK":"BANK", "RBLBANK":"BANK", "IDFCFIRSTB":"BANK",
+    "ABCAPITAL":"NBFC", "SHRIRAMFIN":"NBFC", "CHOLAFIN":"NBFC", "BAJFINANCE":"NBFC",
+    "BAJAJFINSV":"NBFC", "MANAPPURAM":"NBFC", "MUTHOOTFIN":"NBFC", "LTF":"NBFC",
+    "PNBHOUSING":"NBFC", "LICHSGFIN":"NBFC",
+    "TCS":"IT", "INFY":"IT", "HCLTECH":"IT", "WIPRO":"IT", "TECHM":"IT",
+    "OFSS":"IT", "MPHASIS":"IT", "COFORGE":"IT", "PERSISTENT":"IT", "KPITTECH":"IT",
+    "INDIGO":"AVIATION", "MOTHERSON":"AUTO", "MARUTI":"AUTO", "TVSMOTOR":"AUTO",
+    "BAJAJ-AUTO":"AUTO", "HEROMOTOCO":"AUTO", "ASHOKLEY":"AUTO", "EICHERMOT":"AUTO",
+    "HYUNDAI":"AUTO", "UNOMINDA":"AUTO",
+    "SHREECEM":"CEMENT", "ULTRACEMCO":"CEMENT", "DALBHARAT":"CEMENT", "AMBUJACEM":"CEMENT",
+    "TRENT":"RETAIL", "DMART":"RETAIL", "NYKAA":"RETAIL",
+    "GODREJPROP":"REALTY", "LODHA":"REALTY", "DLF":"REALTY", "PRESTIGE":"REALTY",
+    "OBEROIRLTY":"REALTY", "PHOENIXLTD":"REALTY",
+}
 
 
 def log(msg):
@@ -85,11 +106,12 @@ def fetch_prices(symbols):
 def load_signals():
     if not os.path.exists(SCAN_FILE):
         log(f"  !! {SCAN_FILE} not found — run long_buildup_scanner.py first")
-        return [], "UNKNOWN"
+        return [], "UNKNOWN", 0.0
     with open(SCAN_FILE) as f:
         data = json.load(f)
-    macro = data.get("macro", {}).get("sentiment", "UNKNOWN")
-    return data.get("results", []), macro
+    macro    = data.get("macro", {}).get("sentiment", "UNKNOWN")
+    fii_net  = float(data.get("macro", {}).get("fii_net_cr", 0) or 0)
+    return data.get("results", []), macro, fii_net
 
 
 # ── Excel report ──────────────────────────────────────────────────────────────
@@ -260,8 +282,7 @@ def generate_excel(portfolio, all_prices):
 # ── Main ──────────────────────────────────────────────────────────────────────
 def run(intraday_only=False):
     portfolio = load_portfolio()
-    signals, macro = load_signals()
-    signal_map = {r["symbol"]: r for r in signals}
+    signals, macro, fii_net = load_signals()
     today      = datetime.now().strftime("%Y-%m-%d")
 
     log("=" * 72)
@@ -296,10 +317,6 @@ def run(intraday_only=False):
             reason = "SL HIT"
         elif curr >= pos["target"]:
             reason = "TARGET HIT"
-        elif signals and sym not in signal_map:
-            # Only exit on SIGNAL GONE when scanner actually returned results.
-            # Empty signals means bhav copy unavailable intraday — not a real exit.
-            reason = "SIGNAL GONE"
 
         sign   = "+" if pnl_abs >= 0 else ""
         marker = "✗" if reason else " "
@@ -352,11 +369,36 @@ def run(intraday_only=False):
     elif macro == "CAUTIOUS":
         log("  **  MACRO CAUTIOUS — FII net selling. Entering with reduced conviction. **")
 
-    for sig in new_signals[:slots_free]:
+    # Track sectors already occupied (open positions + today's new entries)
+    fii_selling = fii_net < -500  # FII net sellers by more than 500 Cr
+    if fii_selling:
+        log(f"  ⚠  FII net selling (₹{fii_net:+,.0f} Cr) — BANK/NBFC entries blocked today")
+    sector_count = {}
+    for sym_open in portfolio["positions"]:
+        sec = SECTOR_MAP.get(sym_open)
+        if sec:
+            sector_count[sec] = sector_count.get(sec, 0) + 1
+
+    entered = 0
+    for sig in new_signals:
+        if entered >= slots_free:
+            break
         sym      = sig["symbol"]
         entry_px = sig["spot_price"]
         if entry_px <= 0:
             continue
+
+        # Sector cap: skip if sector already at MAX_PER_SECTOR
+        sec = SECTOR_MAP.get(sym)
+        if sec and sector_count.get(sec, 0) >= MAX_PER_SECTOR:
+            log(f"  — SKIP  {sym:<14} sector {sec} already has {sector_count[sec]} position(s)")
+            continue
+
+        # FII sell filter: block BANK/NBFC when FII is net selling
+        if fii_selling and sec in ("BANK", "NBFC"):
+            log(f"  — SKIP  {sym:<14} FII selling — {sec} blocked")
+            continue
+
         allocated = min(ALLOC_PER_TRADE, portfolio["cash"])
         if allocated < entry_px:
             log(f"  !! {sym}: not enough cash (need ₹{entry_px:.2f}, have ₹{portfolio['cash']:,.0f})")
@@ -380,6 +422,9 @@ def run(intraday_only=False):
             "oi_chg":      sig.get("oi_chg"),
             "macro_entry": macro,
         }
+        if sec:
+            sector_count[sec] = sector_count.get(sec, 0) + 1
+        entered += 1
         log(f"  + OPEN  {sym:<14} {qty} sh @ ₹{entry_px:,.2f}"
             f"  invested ₹{invested:,.0f}  SL ₹{sl_px:.2f}  T ₹{tgt_px:.2f}  [{macro}]")
 

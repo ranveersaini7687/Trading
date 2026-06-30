@@ -9,7 +9,7 @@ import requests
 import time
 import json
 import functools
-from datetime import datetime
+from datetime import datetime, timedelta
 from angel_api import AngelOneAPI
 
 angel = AngelOneAPI()
@@ -201,8 +201,26 @@ def _fetch_fii_dii(session):
     return result
 
 
+def _validate_api_date(api_date_str, trade_date):
+    """Return True if api_date_str (DD-Mon-YYYY) matches trade_date (YYYYMMDD)."""
+    try:
+        api_dt = datetime.strptime(api_date_str, "%d-%b-%Y").date()
+        expected = datetime.strptime(trade_date, "%Y%m%d").date()
+        return api_dt == expected
+    except ValueError:
+        return False
+
+
 def get_fii_dii_data(session, trade_date):
     log("Step 7 — FII/DII institutional flow (NSE)")
+
+    # NSE provisional data is only available after ~16:30 IST; before that the API
+    # returns the previous day's final figures, which would skew the macro signal.
+    now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
+    if now_ist.hour < 16 or (now_ist.hour == 16 and now_ist.minute < 30):
+        log(f"  → Skipping — NSE data not yet released (IST {now_ist.strftime('%H:%M')}, wait until 16:30)")
+        return {}
+
     os.makedirs(CACHE_DIR, exist_ok=True)
     cache_file = os.path.join(CACHE_DIR, f"fii_dii_{trade_date}.json")
     if os.path.exists(cache_file):
@@ -213,13 +231,24 @@ def get_fii_dii_data(session, trade_date):
             data = data["data"]
         fii_net = data.get("fii_net", 0)
         dii_net = data.get("dii_net", 0)
-        # re-fetch if values look stale (both zero means old bad cache)
+        api_date = data.get("date", "")
         if fii_net == 0 and dii_net == 0:
             log("  → Cache looks stale, re-fetching...")
+        elif not _validate_api_date(api_date, trade_date):
+            log(f"  → Cache date mismatch (got {api_date}) — deleting stale cache and re-fetching...")
+            os.remove(cache_file)
         else:
             log(f"  → FII net: ₹{fii_net:+,.2f} Cr  DII net: ₹{dii_net:+,.2f} Cr (cached)")
             return data
+
     data = _fetch_fii_dii(session)
+
+    # Reject data if it belongs to a different (previous) trading day
+    api_date = data.get("date", "")
+    if not _validate_api_date(api_date, trade_date):
+        log(f"  !! FII/DII date mismatch — API returned {api_date!r}, expected today — defaulting to NEUTRAL")
+        return {}
+
     with open(cache_file, "w") as f:
         json.dump(data, f)
     log(f"  → FII net: ₹{data.get('fii_net', 0):+,.2f} Cr  DII net: ₹{data.get('dii_net', 0):+,.2f} Cr")
