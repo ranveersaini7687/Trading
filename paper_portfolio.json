@@ -1,6 +1,6 @@
 {
   "total_capital": 1000000,
-  "cash": 29611.67999999995,
+  "cash": 505771.12,
   "positions": {
     "AUROPHARMA": {
       "entry_price": 1577.8,
@@ -46,50 +46,6 @@
       "oi_chg": 4.76,
       "macro_entry": "NEUTRAL"
     },
-    "PAGEIND": {
-      "entry_price": 40885.0,
-      "quantity": 2,
-      "invested": 81770.0,
-      "entry_date": "2026-06-24",
-      "stop_loss": 40476.15,
-      "target": 41702.7,
-      "pcr": null,
-      "oi_chg": null,
-      "macro_entry": "NEUTRAL"
-    },
-    "GODREJPROP": {
-      "entry_price": 1852.4,
-      "quantity": 53,
-      "invested": 98177.2,
-      "entry_date": "2026-06-25",
-      "stop_loss": 1833.88,
-      "target": 1889.45,
-      "pcr": null,
-      "oi_chg": null,
-      "macro_entry": "BULLISH"
-    },
-    "CHOLAFIN": {
-      "entry_price": 1799.6,
-      "quantity": 55,
-      "invested": 98978.0,
-      "entry_date": "2026-06-25",
-      "stop_loss": 1781.6,
-      "target": 1835.59,
-      "pcr": null,
-      "oi_chg": null,
-      "macro_entry": "BULLISH"
-    },
-    "UNITDSPR": {
-      "entry_price": 1385.3,
-      "quantity": 72,
-      "invested": 99741.6,
-      "entry_date": "2026-06-25",
-      "stop_loss": 1371.45,
-      "target": 1413.01,
-      "pcr": null,
-      "oi_chg": null,
-      "macro_entry": "BULLISH"
-    },
     "CIPLA": {
       "entry_price": 1455.4,
       "quantity": 68,
@@ -97,17 +53,6 @@
       "entry_date": "2026-06-29",
       "stop_loss": 1440.85,
       "target": 1484.51,
-      "pcr": null,
-      "oi_chg": null,
-      "macro_entry": "NEUTRAL"
-    },
-    "CGPOWER": {
-      "entry_price": 959.85,
-      "quantity": 104,
-      "invested": 99824.4,
-      "entry_date": "2026-06-29",
-      "stop_loss": 950.25,
-      "target": 979.05,
       "pcr": null,
       "oi_chg": null,
       "macro_entry": "NEUTRAL"
@@ -244,6 +189,66 @@
       "pnl_abs": 2101.85,
       "pnl_pct": 2.1,
       "reason": "TARGET HIT",
+      "macro_entry": "NEUTRAL"
+    },
+    {
+      "symbol": "PAGEIND",
+      "entry_date": "2026-06-24",
+      "exit_date": "2026-06-25",
+      "entry_price": 40885.0,
+      "exit_price": 41702.7,
+      "quantity": 2,
+      "pnl_abs": 1635.4,
+      "pnl_pct": 2.0,
+      "reason": "TARGET HIT",
+      "macro_entry": "NEUTRAL"
+    },
+    {
+      "symbol": "GODREJPROP",
+      "entry_date": "2026-06-25",
+      "exit_date": "2026-06-29",
+      "entry_price": 1852.4,
+      "exit_price": 1833.88,
+      "quantity": 53,
+      "pnl_abs": -981.56,
+      "pnl_pct": -1.0,
+      "reason": "SL HIT",
+      "macro_entry": "BULLISH"
+    },
+    {
+      "symbol": "CHOLAFIN",
+      "entry_date": "2026-06-25",
+      "exit_date": "2026-06-29",
+      "entry_price": 1799.6,
+      "exit_price": 1781.6,
+      "quantity": 55,
+      "pnl_abs": -990.0,
+      "pnl_pct": -1.0,
+      "reason": "SL HIT",
+      "macro_entry": "BULLISH"
+    },
+    {
+      "symbol": "UNITDSPR",
+      "entry_date": "2026-06-25",
+      "exit_date": "2026-06-29",
+      "entry_price": 1385.3,
+      "exit_price": 1371.45,
+      "quantity": 72,
+      "pnl_abs": -997.2,
+      "pnl_pct": -1.0,
+      "reason": "SL HIT",
+      "macro_entry": "BULLISH"
+    },
+    {
+      "symbol": "CGPOWER",
+      "entry_date": "2026-06-29",
+      "exit_date": "2026-06-30",
+      "entry_price": 959.85,
+      "exit_price": 950.25,
+      "quantity": 104,
+      "pnl_abs": -998.4,
+      "pnl_pct": -1.0,
+      "reason": "SL HIT",
       "macro_entry": "NEUTRAL"
     }
   ],
