@@ -162,14 +162,28 @@ def _entry_storage(record):
 
 
 def _entry_excel_cols(record):
-    """Map stored entry params to Excel column names."""
+    """Map stored entry params to Excel columns.
+
+    Only trades opened after the entry-snapshot change have price_chg set.
+    Legacy trades keep Macro only; new columns show '-'.
+    """
+    macro = record.get("macro_entry", "?")
+    if record.get("price_chg") is None:
+        return {
+            "Price Chg %": "-",
+            "OI Chg %":    "-",
+            "Vol Ratio":   "-",
+            "PCR":         "-",
+            "Sector":      "-",
+            "Macro":       macro,
+        }
     return {
         "Price Chg %": _fmt_entry_val(record.get("price_chg")),
         "OI Chg %":    _fmt_entry_val(record.get("oi_chg")),
         "Vol Ratio":   _fmt_entry_val(record.get("vol_ratio")),
         "PCR":         _fmt_entry_val(record.get("pcr")),
         "Sector":      record.get("sector") or "-",
-        "Macro":       record.get("macro_entry", "?"),
+        "Macro":       macro,
     }
 
 
