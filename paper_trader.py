@@ -143,6 +143,43 @@ def _header_row(ws):
         cell.alignment = CENTER
 
 
+def _fmt_entry_val(val):
+    if val is None:
+        return "-"
+    return val
+
+
+def _entry_storage(record):
+    """Persist scanner entry snapshot on positions and closed_trades."""
+    return {
+        "price_chg":   record.get("price_chg"),
+        "oi_chg":      record.get("oi_chg"),
+        "vol_ratio":   record.get("vol_ratio"),
+        "pcr":         record.get("pcr"),
+        "sector":      record.get("sector") or "-",
+        "macro_entry": record.get("macro_entry", "UNKNOWN"),
+    }
+
+
+def _entry_excel_cols(record):
+    """Map stored entry params to Excel column names."""
+    return {
+        "Price Chg %": _fmt_entry_val(record.get("price_chg")),
+        "OI Chg %":    _fmt_entry_val(record.get("oi_chg")),
+        "Vol Ratio":   _fmt_entry_val(record.get("vol_ratio")),
+        "PCR":         _fmt_entry_val(record.get("pcr")),
+        "Sector":      record.get("sector") or "-",
+        "Macro":       record.get("macro_entry", "?"),
+    }
+
+
+ALL_TRADES_COLUMNS = [
+    "Symbol", "Entry Date", "Exit Date", "Entry ₹", "Exit ₹", "Qty",
+    "Price Chg %", "OI Chg %", "Vol Ratio", "PCR", "Sector", "Macro",
+    "P&L ₹", "P&L %", "Status", "Exit Reason",
+]
+
+
 def generate_excel(portfolio, all_prices):
     trades     = portfolio.get("closed_trades", [])
     positions  = portfolio.get("positions", {})
@@ -156,8 +193,9 @@ def generate_excel(portfolio, all_prices):
                 "Symbol": t["symbol"], "Entry Date": t["entry_date"],
                 "Exit Date": t["exit_date"], "Entry ₹": t["entry_price"],
                 "Exit ₹": t["exit_price"], "Qty": t["quantity"],
+                **_entry_excel_cols(t),
                 "P&L ₹": t["pnl_abs"], "P&L %": t["pnl_pct"],
-                "Status": "CLOSED", "Exit Reason": t["reason"], "Macro": t.get("macro_entry", "?"),
+                "Status": "CLOSED", "Exit Reason": t["reason"],
             })
         open_rows = []
         for sym, pos in positions.items():
@@ -168,13 +206,12 @@ def generate_excel(portfolio, all_prices):
                 "Symbol": sym, "Entry Date": pos["entry_date"],
                 "Exit Date": "-", "Entry ₹": pos["entry_price"],
                 "Exit ₹": curr, "Qty": pos["quantity"],
+                **_entry_excel_cols(pos),
                 "P&L ₹": pnl, "P&L %": pnl_pct,
-                "Status": "OPEN", "Exit Reason": "-", "Macro": pos.get("macro_entry", "?"),
+                "Status": "OPEN", "Exit Reason": "-",
             })
         all_rows = open_rows + closed_rows
-        df = pd.DataFrame(all_rows, columns=["Symbol", "Entry Date", "Exit Date", "Entry ₹",
-                                              "Exit ₹", "Qty", "P&L ₹", "P&L %",
-                                              "Status", "Exit Reason", "Macro"])
+        df = pd.DataFrame(all_rows, columns=ALL_TRADES_COLUMNS)
         df.to_excel(writer, sheet_name="All Trades", index=False)
 
         # ── Sheet 2: Open Positions ───────────────────────────────────────────
@@ -187,6 +224,7 @@ def generate_excel(portfolio, all_prices):
                 "Symbol":        sym,
                 "Entry Date":    pos["entry_date"],
                 "Entry ₹":       pos["entry_price"],
+                **_entry_excel_cols(pos),
                 "CMP ₹":         curr,
                 "Qty":           pos["quantity"],
                 "Invested ₹":    pos["invested"],
@@ -194,7 +232,6 @@ def generate_excel(portfolio, all_prices):
                 "P&L %":         pnl_pct,
                 "SL ₹":          pos["stop_loss"],
                 "Target ₹":      pos["target"],
-                "Macro":         pos.get("macro_entry", "?"),
             })
         pd.DataFrame(rows).to_excel(writer, sheet_name="Open Positions", index=False)
 
@@ -340,7 +377,7 @@ def run(intraday_only=False):
             "pnl_abs":     pnl_abs,
             "pnl_pct":     pnl_pct,
             "reason":      reason,
-            "macro_entry": pos.get("macro_entry", "UNKNOWN"),
+            **_entry_storage(pos),
         })
         sign = "+" if pnl_abs >= 0 else ""
         log(f"  ✗ CLOSED {sym:<14} Exit ₹{exit_px:.2f}  P&L ₹{sign}{pnl_abs:,.0f} ({sign}{pnl_pct:.2f}%)  [{reason}]")
@@ -418,9 +455,14 @@ def run(intraday_only=False):
             "entry_date":  today,
             "stop_loss":   sl_px,
             "target":      tgt_px,
-            "pcr":         sig.get("pcr"),
-            "oi_chg":      sig.get("oi_chg"),
-            "macro_entry": macro,
+            **_entry_storage({
+                "price_chg":   sig.get("price_chg"),
+                "oi_chg":      sig.get("oi_chg"),
+                "vol_ratio":   sig.get("vol_ratio"),
+                "pcr":         sig.get("pcr"),
+                "sector":      sec or "-",
+                "macro_entry": macro,
+            }),
         }
         if sec:
             sector_count[sec] = sector_count.get(sec, 0) + 1
