@@ -25,8 +25,10 @@ from openpyxl.utils import get_column_letter
 
 # ── Config ────────────────────────────────────────────────────────────────────
 PORTFOLIO_FILE  = "paper_portfolio.json"
+CONFIRM_PORTFOLIO_FILE = "paper_portfolio_confirm.json"
 SCAN_FILE       = "scan_results.json"
 EXCEL_FILE      = "trade_log.xlsx"
+CONFIRM_LOG_FILE = "eod_confirm_log.json"
 
 TOTAL_CAPITAL   = 1_000_000      # ₹10,00,000
 MAX_POSITIONS   = 10              # up to 10 slots × ₹1L
@@ -61,11 +63,7 @@ def log(msg):
 
 
 # ── Portfolio persistence ─────────────────────────────────────────────────────
-def load_portfolio():
-    if os.path.exists(PORTFOLIO_FILE):
-        with open(PORTFOLIO_FILE) as f:
-            return json.load(f)
-    log("  [portfolio] No existing portfolio — starting fresh with ₹10,00,000")
+def _empty_portfolio():
     return {
         "total_capital":  TOTAL_CAPITAL,
         "cash":           TOTAL_CAPITAL,
@@ -75,8 +73,16 @@ def load_portfolio():
     }
 
 
-def save_portfolio(portfolio):
-    with open(PORTFOLIO_FILE, "w") as f:
+def load_portfolio(path=PORTFOLIO_FILE):
+    if os.path.exists(path):
+        with open(path) as f:
+            return json.load(f)
+    log(f"  [portfolio] No existing portfolio at {path} — starting fresh with ₹10,00,000")
+    return _empty_portfolio()
+
+
+def save_portfolio(portfolio, path=PORTFOLIO_FILE):
+    with open(path, "w") as f:
         json.dump(portfolio, f, indent=2)
 
 
@@ -193,177 +199,282 @@ ALL_TRADES_COLUMNS = [
     "P&L ₹", "P&L %", "Status", "Exit Reason",
 ]
 
+EOD_CONFIRM_COLUMNS = [
+    "Date", "Symbol", "Scan Time", "Confirm Time",
+    "Price Chg %", "OI Chg %", "Vol 3:15", "Vol 3:27", "PCR", "Sector", "Macro",
+    "Open ₹", "High ₹", "Low ₹", "LTP ₹",
+    "Close>Open", "Near High", "New High",
+    "Confirm Pass", "Baseline Entered", "Confirm Entered", "Fail Reason",
+]
 
-def generate_excel(portfolio, all_prices):
-    trades     = portfolio.get("closed_trades", [])
-    positions  = portfolio.get("positions", {})
+
+def _bool_col(val):
+    if val is True:
+        return "Yes"
+    if val is False:
+        return "No"
+    return "-"
+
+
+def _load_confirm_log_entries():
+    if not os.path.exists(CONFIRM_LOG_FILE):
+        return []
+    with open(CONFIRM_LOG_FILE) as f:
+        data = json.load(f)
+    return data.get("entries", []) if isinstance(data, dict) else []
+
+
+def _trades_rows(portfolio, all_prices):
+    """Build All Trades rows for a portfolio dict."""
+    closed_rows, open_rows = [], []
+    for t in portfolio.get("closed_trades", []):
+        closed_rows.append({
+            "Symbol": t["symbol"], "Entry Date": t["entry_date"],
+            "Exit Date": t["exit_date"], "Entry ₹": t["entry_price"],
+            "Exit ₹": t["exit_price"], "Qty": t["quantity"],
+            **_entry_excel_cols(t),
+            "P&L ₹": t["pnl_abs"], "P&L %": t["pnl_pct"],
+            "Status": "CLOSED", "Exit Reason": t["reason"],
+        })
+    for sym, pos in portfolio.get("positions", {}).items():
+        curr = all_prices.get(sym) or pos["entry_price"]
+        pnl = round((curr - pos["entry_price"]) * pos["quantity"], 2)
+        pnl_pct = round((curr - pos["entry_price"]) / pos["entry_price"] * 100, 2)
+        open_rows.append({
+            "Symbol": sym, "Entry Date": pos["entry_date"],
+            "Exit Date": "-", "Entry ₹": pos["entry_price"],
+            "Exit ₹": curr, "Qty": pos["quantity"],
+            **_entry_excel_cols(pos),
+            "P&L ₹": pnl, "P&L %": pnl_pct,
+            "Status": "OPEN", "Exit Reason": "-",
+        })
+    return open_rows + closed_rows
+
+
+def _eod_confirm_rows():
+    rows = []
+    for e in _load_confirm_log_entries():
+        rows.append({
+            "Date": e.get("date"),
+            "Symbol": e.get("symbol"),
+            "Scan Time": e.get("scan_time", ""),
+            "Confirm Time": e.get("confirm_time", ""),
+            "Price Chg %": _fmt_entry_val(e.get("price_chg")),
+            "OI Chg %": _fmt_entry_val(e.get("oi_chg")),
+            "Vol 3:15": _fmt_entry_val(e.get("vol_ratio_scan")),
+            "Vol 3:27": _fmt_entry_val(e.get("vol_ratio_confirm")),
+            "PCR": _fmt_entry_val(e.get("pcr")),
+            "Sector": e.get("sector", "-"),
+            "Macro": e.get("macro", "?"),
+            "Open ₹": _fmt_entry_val(e.get("open")),
+            "High ₹": _fmt_entry_val(e.get("high")),
+            "Low ₹": _fmt_entry_val(e.get("low")),
+            "LTP ₹": _fmt_entry_val(e.get("ltp")),
+            "Close>Open": _bool_col(e.get("close_gt_open")),
+            "Near High": _bool_col(e.get("near_day_high")),
+            "New High": _bool_col(e.get("new_high")),
+            "Confirm Pass": _bool_col(e.get("confirm_pass")),
+            "Baseline Entered": _bool_col(e.get("baseline_entered")),
+            "Confirm Entered": _bool_col(e.get("confirm_entered")),
+            "Fail Reason": e.get("fail_reason") or "-",
+        })
+    return rows
+
+
+PNL_COLUMNS = ["Date", "Trades", "P&L ₹", "Wins", "Losses", "Win Rate %", "Cumul P&L ₹"]
+PNL_WEEK_COLUMNS = ["Week", "Trades", "P&L ₹", "Wins", "Losses", "Win Rate %", "Cumul P&L ₹"]
+PNL_MONTH_COLUMNS = ["Month", "Trades", "P&L ₹", "Wins", "Losses", "Win Rate %", "Cumul P&L ₹"]
+
+
+def _build_daily_pnl(trades):
+    if not trades:
+        return pd.DataFrame(columns=PNL_COLUMNS)
+    df2 = pd.DataFrame(trades)
+    daily = (df2.groupby("exit_date")
+                .agg(Trades=("symbol", "count"),
+                     PnL=("pnl_abs", "sum"),
+                     Wins=("pnl_abs", lambda x: (x > 0).sum()),
+                     Losses=("pnl_abs", lambda x: (x <= 0).sum()))
+                .reset_index()
+                .sort_values("exit_date"))
+    daily.columns = ["Date", "Trades", "P&L ₹", "Wins", "Losses"]
+    daily["Win Rate %"] = (daily["Wins"] / daily["Trades"] * 100).round(1)
+    daily["P&L ₹"] = daily["P&L ₹"].round(2)
+    daily["Cumul P&L ₹"] = daily["P&L ₹"].cumsum().round(2)
+    return daily
+
+
+def _build_weekly_pnl(trades):
+    if not trades:
+        return pd.DataFrame(columns=PNL_WEEK_COLUMNS)
+    df3 = pd.DataFrame(trades)
+    df3["exit_date"] = pd.to_datetime(df3["exit_date"])
+    df3["Week"] = df3["exit_date"].dt.strftime("W%V %Y")
+    df3["wk_sort"] = df3["exit_date"].dt.strftime("%Y-W%V")
+    weekly = (df3.groupby(["wk_sort", "Week"])
+                 .agg(Trades=("symbol", "count"),
+                      PnL=("pnl_abs", "sum"),
+                      Wins=("pnl_abs", lambda x: (x > 0).sum()),
+                      Losses=("pnl_abs", lambda x: (x <= 0).sum()))
+                 .reset_index()
+                 .sort_values("wk_sort")
+                 .drop("wk_sort", axis=1))
+    weekly.columns = ["Week", "Trades", "P&L ₹", "Wins", "Losses"]
+    weekly["Win Rate %"] = (weekly["Wins"] / weekly["Trades"] * 100).round(1)
+    weekly["P&L ₹"] = weekly["P&L ₹"].round(2)
+    weekly["Cumul P&L ₹"] = weekly["P&L ₹"].cumsum().round(2)
+    return weekly
+
+
+def _build_monthly_pnl(trades):
+    if not trades:
+        return pd.DataFrame(columns=PNL_MONTH_COLUMNS)
+    df4 = pd.DataFrame(trades)
+    df4["exit_date"] = pd.to_datetime(df4["exit_date"])
+    df4["Month"] = df4["exit_date"].dt.strftime("%b %Y")
+    df4["mo_sort"] = df4["exit_date"].dt.strftime("%Y-%m")
+    monthly = (df4.groupby(["mo_sort", "Month"])
+                  .agg(Trades=("symbol", "count"),
+                       PnL=("pnl_abs", "sum"),
+                       Wins=("pnl_abs", lambda x: (x > 0).sum()),
+                       Losses=("pnl_abs", lambda x: (x <= 0).sum()))
+                  .reset_index()
+                  .sort_values("mo_sort")
+                  .drop("mo_sort", axis=1))
+    monthly.columns = ["Month", "Trades", "P&L ₹", "Wins", "Losses"]
+    monthly["Win Rate %"] = (monthly["Wins"] / monthly["Trades"] * 100).round(1)
+    monthly["P&L ₹"] = monthly["P&L ₹"].round(2)
+    monthly["Cumul P&L ₹"] = monthly["P&L ₹"].cumsum().round(2)
+    return monthly
+
+
+def _open_positions_rows(portfolio, all_prices):
+    rows = []
+    for sym, pos in portfolio.get("positions", {}).items():
+        curr = all_prices.get(sym) or pos["entry_price"]
+        pnl = round((curr - pos["entry_price"]) * pos["quantity"], 2)
+        pnl_pct = round((curr - pos["entry_price"]) / pos["entry_price"] * 100, 2)
+        rows.append({
+            "Symbol": sym,
+            "Entry Date": pos["entry_date"],
+            "Entry ₹": pos["entry_price"],
+            **_entry_excel_cols(pos),
+            "CMP ₹": curr,
+            "Qty": pos["quantity"],
+            "Invested ₹": pos["invested"],
+            "Unrealised ₹": pnl,
+            "P&L %": pnl_pct,
+            "SL ₹": pos["stop_loss"],
+            "Target ₹": pos["target"],
+        })
+    open_df = pd.DataFrame(rows)
+    if not open_df.empty:
+        open_df["_sort"] = pd.to_datetime(open_df["Entry Date"], errors="coerce")
+        open_df = open_df.sort_values("_sort", ascending=False).drop(columns="_sort").reset_index(drop=True)
+    return open_df
+
+
+def generate_excel(portfolio, all_prices, confirm_portfolio=None):
+    trades = portfolio.get("closed_trades", [])
+    if confirm_portfolio is None:
+        confirm_portfolio = load_portfolio(CONFIRM_PORTFOLIO_FILE)
+    confirm_trades = confirm_portfolio.get("closed_trades", [])
+
+    confirm_syms = list(confirm_portfolio.get("positions", {}).keys())
+    confirm_prices = fetch_prices(confirm_syms) if confirm_syms else {}
+    all_confirm_prices = {**all_prices, **confirm_prices}
 
     with pd.ExcelWriter(EXCEL_FILE, engine="openpyxl") as writer:
 
-        # ── Sheet 1: All Trades (closed + open) ──────────────────────────────
-        closed_rows = []
-        for t in trades:
-            closed_rows.append({
-                "Symbol": t["symbol"], "Entry Date": t["entry_date"],
-                "Exit Date": t["exit_date"], "Entry ₹": t["entry_price"],
-                "Exit ₹": t["exit_price"], "Qty": t["quantity"],
-                **_entry_excel_cols(t),
-                "P&L ₹": t["pnl_abs"], "P&L %": t["pnl_pct"],
-                "Status": "CLOSED", "Exit Reason": t["reason"],
-            })
-        open_rows = []
-        for sym, pos in positions.items():
-            curr    = all_prices.get(sym) or pos["entry_price"]
-            pnl     = round((curr - pos["entry_price"]) * pos["quantity"], 2)
-            pnl_pct = round((curr - pos["entry_price"]) / pos["entry_price"] * 100, 2)
-            open_rows.append({
-                "Symbol": sym, "Entry Date": pos["entry_date"],
-                "Exit Date": "-", "Entry ₹": pos["entry_price"],
-                "Exit ₹": curr, "Qty": pos["quantity"],
-                **_entry_excel_cols(pos),
-                "P&L ₹": pnl, "P&L %": pnl_pct,
-                "Status": "OPEN", "Exit Reason": "-",
-            })
-        all_rows = open_rows + closed_rows
+        # ── Sheet 1: All Trades (baseline) ───────────────────────────────────
+        all_rows = _trades_rows(portfolio, all_prices)
         df = pd.DataFrame(all_rows, columns=ALL_TRADES_COLUMNS)
-        df["_sort"] = pd.to_datetime(df["Entry Date"], errors="coerce")
-        df = df.sort_values("_sort", ascending=False).drop(columns="_sort").reset_index(drop=True)
+        if not df.empty:
+            df["_sort"] = pd.to_datetime(df["Entry Date"], errors="coerce")
+            df = df.sort_values("_sort", ascending=False).drop(columns="_sort").reset_index(drop=True)
         df.to_excel(writer, sheet_name="All Trades", index=False)
 
-        # ── Sheet 2: Open Positions ───────────────────────────────────────────
-        rows = []
-        for sym, pos in positions.items():
-            curr    = all_prices.get(sym) or pos["entry_price"]
-            pnl     = round((curr - pos["entry_price"]) * pos["quantity"], 2)
-            pnl_pct = round((curr - pos["entry_price"]) / pos["entry_price"] * 100, 2)
-            rows.append({
-                "Symbol":        sym,
-                "Entry Date":    pos["entry_date"],
-                "Entry ₹":       pos["entry_price"],
-                **_entry_excel_cols(pos),
-                "CMP ₹":         curr,
-                "Qty":           pos["quantity"],
-                "Invested ₹":    pos["invested"],
-                "Unrealised ₹":  pnl,
-                "P&L %":         pnl_pct,
-                "SL ₹":          pos["stop_loss"],
-                "Target ₹":      pos["target"],
-            })
-        open_df = pd.DataFrame(rows)
-        if not open_df.empty:
-            open_df["_sort"] = pd.to_datetime(open_df["Entry Date"], errors="coerce")
-            open_df = open_df.sort_values("_sort", ascending=False).drop(columns="_sort").reset_index(drop=True)
+        # ── Sheet 2: Confirm Trades (3:27 shadow strategy) ───────────────────
+        confirm_rows = _trades_rows(confirm_portfolio, all_confirm_prices)
+        cdf = pd.DataFrame(confirm_rows, columns=ALL_TRADES_COLUMNS)
+        if not cdf.empty:
+            cdf["_sort"] = pd.to_datetime(cdf["Entry Date"], errors="coerce")
+            cdf = cdf.sort_values("_sort", ascending=False).drop(columns="_sort").reset_index(drop=True)
+        cdf.to_excel(writer, sheet_name="Confirm Trades", index=False)
+
+        # ── Sheet 3: EOD Confirm log ─────────────────────────────────────────
+        eod_rows = _eod_confirm_rows()
+        edf = pd.DataFrame(eod_rows, columns=EOD_CONFIRM_COLUMNS)
+        if not edf.empty:
+            edf["_sort"] = pd.to_datetime(edf["Date"], errors="coerce")
+            edf = edf.sort_values("_sort", ascending=False).drop(columns="_sort").reset_index(drop=True)
+        edf.to_excel(writer, sheet_name="EOD Confirm", index=False)
+
+        # ── Sheet 4: Open Positions (baseline) ────────────────────────────────
+        open_df = _open_positions_rows(portfolio, all_prices)
         open_df.to_excel(writer, sheet_name="Open Positions", index=False)
 
-        # ── Sheet 3: Daily P&L ────────────────────────────────────────────────
-        if trades:
-            df2 = pd.DataFrame(trades)
-            daily = (df2.groupby("exit_date")
-                        .agg(Trades=("symbol", "count"),
-                             PnL=("pnl_abs", "sum"),
-                             Wins=("pnl_abs", lambda x: (x > 0).sum()),
-                             Losses=("pnl_abs", lambda x: (x <= 0).sum()))
-                        .reset_index()
-                        .sort_values("exit_date"))
-            daily.columns = ["Date", "Trades", "P&L ₹", "Wins", "Losses"]
-            daily["Win Rate %"] = (daily["Wins"] / daily["Trades"] * 100).round(1)
-            daily["P&L ₹"]      = daily["P&L ₹"].round(2)
-            daily["Cumul P&L ₹"] = daily["P&L ₹"].cumsum().round(2)
-        else:
-            daily = pd.DataFrame(columns=["Date", "Trades", "P&L ₹",
-                                           "Wins", "Losses", "Win Rate %", "Cumul P&L ₹"])
-        daily.to_excel(writer, sheet_name="Daily P&L", index=False)
+        # ── Sheet 5: Confirm Open Positions ───────────────────────────────────
+        confirm_open_df = _open_positions_rows(confirm_portfolio, all_confirm_prices)
+        confirm_open_df.to_excel(writer, sheet_name="Confirm Open Positions", index=False)
 
-        # ── Sheet 4: Weekly P&L ───────────────────────────────────────────────
-        if trades:
-            df3 = pd.DataFrame(trades)
-            df3["exit_date"] = pd.to_datetime(df3["exit_date"])
-            df3["Week"] = df3["exit_date"].dt.strftime("W%V %Y")
-            df3["wk_sort"] = df3["exit_date"].dt.strftime("%Y-W%V")
-            weekly = (df3.groupby(["wk_sort", "Week"])
-                         .agg(Trades=("symbol", "count"),
-                              PnL=("pnl_abs", "sum"),
-                              Wins=("pnl_abs", lambda x: (x > 0).sum()),
-                              Losses=("pnl_abs", lambda x: (x <= 0).sum()))
-                         .reset_index()
-                         .sort_values("wk_sort")
-                         .drop("wk_sort", axis=1))
-            weekly.columns = ["Week", "Trades", "P&L ₹", "Wins", "Losses"]
-            weekly["Win Rate %"] = (weekly["Wins"] / weekly["Trades"] * 100).round(1)
-            weekly["P&L ₹"]      = weekly["P&L ₹"].round(2)
-            weekly["Cumul P&L ₹"] = weekly["P&L ₹"].cumsum().round(2)
-        else:
-            weekly = pd.DataFrame(columns=["Week", "Trades", "P&L ₹",
-                                            "Wins", "Losses", "Win Rate %", "Cumul P&L ₹"])
-        weekly.to_excel(writer, sheet_name="Weekly P&L", index=False)
+        # ── Sheet 6–8: Baseline P&L ───────────────────────────────────────────
+        _build_daily_pnl(trades).to_excel(writer, sheet_name="Daily P&L", index=False)
+        _build_weekly_pnl(trades).to_excel(writer, sheet_name="Weekly P&L", index=False)
+        _build_monthly_pnl(trades).to_excel(writer, sheet_name="Monthly P&L", index=False)
 
-        # ── Sheet 5: Monthly P&L ──────────────────────────────────────────────
-        if trades:
-            df4 = pd.DataFrame(trades)
-            df4["exit_date"] = pd.to_datetime(df4["exit_date"])
-            df4["Month"]     = df4["exit_date"].dt.strftime("%b %Y")
-            df4["mo_sort"]   = df4["exit_date"].dt.strftime("%Y-%m")
-            monthly = (df4.groupby(["mo_sort", "Month"])
-                          .agg(Trades=("symbol", "count"),
-                               PnL=("pnl_abs", "sum"),
-                               Wins=("pnl_abs", lambda x: (x > 0).sum()),
-                               Losses=("pnl_abs", lambda x: (x <= 0).sum()))
-                          .reset_index()
-                          .sort_values("mo_sort")
-                          .drop("mo_sort", axis=1))
-            monthly.columns = ["Month", "Trades", "P&L ₹", "Wins", "Losses"]
-            monthly["Win Rate %"] = (monthly["Wins"] / monthly["Trades"] * 100).round(1)
-            monthly["P&L ₹"]      = monthly["P&L ₹"].round(2)
-            monthly["Cumul P&L ₹"] = monthly["P&L ₹"].cumsum().round(2)
-        else:
-            monthly = pd.DataFrame(columns=["Month", "Trades", "P&L ₹",
-                                             "Wins", "Losses", "Win Rate %", "Cumul P&L ₹"])
-        monthly.to_excel(writer, sheet_name="Monthly P&L", index=False)
+        # ── Sheet 9–11: Confirm strategy P&L ──────────────────────────────────
+        _build_daily_pnl(confirm_trades).to_excel(writer, sheet_name="Confirm Daily P&L", index=False)
+        _build_weekly_pnl(confirm_trades).to_excel(writer, sheet_name="Confirm Weekly P&L", index=False)
+        _build_monthly_pnl(confirm_trades).to_excel(writer, sheet_name="Confirm Monthly P&L", index=False)
 
     # ── Apply colour + formatting ─────────────────────────────────────────────
     wb = load_workbook(EXCEL_FILE)
 
-    for sname in ["All Trades", "Open Positions", "Daily P&L", "Weekly P&L", "Monthly P&L"]:
+    sheet_names = [
+        "All Trades", "Confirm Trades", "EOD Confirm",
+        "Open Positions", "Confirm Open Positions",
+        "Daily P&L", "Weekly P&L", "Monthly P&L",
+        "Confirm Daily P&L", "Confirm Weekly P&L", "Confirm Monthly P&L",
+    ]
+    for sname in sheet_names:
+        if sname not in wb.sheetnames:
+            continue
         ws = wb[sname]
         _header_row(ws)
         _autofit(ws)
-        # Colour P&L columns
         for cell in ws[1]:
             if cell.value and "P&L ₹" in str(cell.value) and "Cumul" not in str(cell.value):
                 _color_pnl_col(ws, get_column_letter(cell.column))
+        if sname == "EOD Confirm":
+            pass_col = None
+            for cell in ws[1]:
+                if cell.value == "Confirm Pass":
+                    pass_col = get_column_letter(cell.column)
+                    break
+            if pass_col:
+                for row in ws.iter_rows(min_row=2, min_col=ws[f"{pass_col}1"].column,
+                                        max_col=ws[f"{pass_col}1"].column):
+                    for cell in row:
+                        if cell.value == "Yes":
+                            cell.fill = GREEN_FILL
+                        elif cell.value == "No":
+                            cell.fill = RED_FILL
 
     wb.save(EXCEL_FILE)
-    log(f"  Trade log saved → {EXCEL_FILE}  (sheets: All Trades | Open Positions | Daily | Weekly | Monthly)")
+    log(f"  Trade log saved → {EXCEL_FILE}  (sheets: {' | '.join(sheet_names)})")
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
-def run(intraday_only=False):
-    portfolio = load_portfolio()
-    signals, macro, fii_net = load_signals()
-    today      = datetime.now().strftime("%Y-%m-%d")
-
-    log("=" * 72)
-    log("  PAPER TRADER — ₹10,00,000 Virtual Portfolio")
-    log(f"  Date       : {datetime.now().strftime('%d %b %Y %H:%M IST')}")
-    log(f"  Cash       : ₹{portfolio['cash']:>10,.0f}  |  Open: {len(portfolio['positions'])} positions")
-    log(f"  FII Macro  : {macro}  |  SL: -{STOP_LOSS_PCT}%  Target: +{TARGET_PCT}%  Alloc: ₹{ALLOC_PER_TRADE:,.0f}/trade")
-    log("=" * 72)
-
-    # ── Step 1: Fetch current prices for all open positions ───────────────────
-    open_syms   = list(portfolio["positions"].keys())
-    curr_prices = fetch_prices(open_syms) if open_syms else {}
-
-    # ── Step 2: Check exits ───────────────────────────────────────────────────
-    log("\n  Checking open positions...")
+# ── Exit / entry helpers ──────────────────────────────────────────────────────
+def _process_exits(portfolio, curr_prices, today, label=""):
+    """Check SL/target on open positions; return (portfolio, closed_count)."""
+    prefix = f"[{label}] " if label else ""
     to_close = []
 
-    if not open_syms:
-        log("  (no open positions)")
-
-    for sym, pos in portfolio["positions"].items():
+    for sym, pos in list(portfolio["positions"].items()):
         curr = curr_prices.get(sym)
         if curr is None:
-            log(f"  ? {sym:<15} — price unavailable, skipping exit check")
+            log(f"  ? {prefix}{sym:<15} — price unavailable, skipping exit check")
             continue
 
         pnl_pct = round((curr - pos["entry_price"]) / pos["entry_price"] * 100, 2)
@@ -375,9 +486,9 @@ def run(intraday_only=False):
         elif curr >= pos["target"]:
             reason = "TARGET HIT"
 
-        sign   = "+" if pnl_abs >= 0 else ""
+        sign = "+" if pnl_abs >= 0 else ""
         marker = "✗" if reason else " "
-        log(f"  {marker} {sym:<15} CMP ₹{curr:>8,.2f}  Entry ₹{pos['entry_price']:>8,.2f}"
+        log(f"  {marker} {prefix}{sym:<15} CMP ₹{curr:>8,.2f}  Entry ₹{pos['entry_price']:>8,.2f}"
             f"  {sign}{pnl_pct:.2f}%  ₹{sign}{pnl_abs:>8,.0f}"
             f"{'  → ' + reason if reason else ''}")
 
@@ -388,112 +499,163 @@ def run(intraday_only=False):
         pos = portfolio["positions"].pop(sym)
         portfolio["cash"] += round(exit_px * pos["quantity"], 2)
         portfolio["closed_trades"].append({
-            "symbol":      sym,
-            "entry_date":  pos["entry_date"],
-            "exit_date":   today,
+            "symbol": sym,
+            "entry_date": pos["entry_date"],
+            "exit_date": today,
             "entry_price": pos["entry_price"],
-            "exit_price":  exit_px,
-            "quantity":    pos["quantity"],
-            "pnl_abs":     pnl_abs,
-            "pnl_pct":     pnl_pct,
-            "reason":      reason,
+            "exit_price": exit_px,
+            "quantity": pos["quantity"],
+            "pnl_abs": pnl_abs,
+            "pnl_pct": pnl_pct,
+            "reason": reason,
             **_entry_storage(pos),
         })
         sign = "+" if pnl_abs >= 0 else ""
-        log(f"  ✗ CLOSED {sym:<14} Exit ₹{exit_px:.2f}  P&L ₹{sign}{pnl_abs:,.0f} ({sign}{pnl_pct:.2f}%)  [{reason}]")
+        log(f"  ✗ {prefix}CLOSED {sym:<14} Exit ₹{exit_px:.2f}  P&L ₹{sign}{pnl_abs:,.0f} ({sign}{pnl_pct:.2f}%)  [{reason}]")
 
-    # ── Step 3: Open new positions ────────────────────────────────────────────
-    if intraday_only:
-        log("  (intraday mode — skipping new entries, SL/target check only)")
-        save_portfolio(portfolio)
-        generate_excel(portfolio, curr_prices)
-        log("=" * 72)
-        return
+    return portfolio, len(to_close)
 
-    already_open  = set(portfolio["positions"].keys())
-    traded_today  = {t["symbol"] for t in portfolio["closed_trades"] if t["exit_date"] == today}
-    skipped_today = [r["symbol"] for r in signals if r["symbol"] in traded_today]
-    new_signals   = [r for r in signals if r["symbol"] not in already_open and r["symbol"] not in traded_today]
-    slots_free    = MAX_POSITIONS - len(portfolio["positions"])
 
-    log(f"\n  Signals: {len(signals)}  |  New: {len(new_signals)}  |  Slots free: {slots_free}  |  Cash: ₹{portfolio['cash']:,.0f}")
-    if skipped_today:
-        log(f"  Skipped (already traded today): {', '.join(skipped_today)}")
+def _open_positions(portfolio, signals, macro, fii_net, today, label=""):
+    """Open new positions from scanner signals. Returns set of symbols entered."""
+    already_open = set(portfolio["positions"].keys())
+    traded_today = {t["symbol"] for t in portfolio["closed_trades"] if t["exit_date"] == today}
+    new_signals = [r for r in signals if r["symbol"] not in already_open and r["symbol"] not in traded_today]
+    slots_free = MAX_POSITIONS - len(portfolio["positions"])
+
+    log(f"\n  {label}Signals: {len(signals)}  |  New: {len(new_signals)}  |  Slots: {slots_free}  |  Cash: ₹{portfolio['cash']:,.0f}")
 
     if macro == "BEARISH":
-        log("  *** MACRO BEARISH — FII aggressively selling. No new entries today. ***")
-        new_signals = []
-    elif macro == "CAUTIOUS":
-        log("  **  MACRO CAUTIOUS — FII net selling. Entering with reduced conviction. **")
+        log(f"  {label}*** MACRO BEARISH — no new entries today ***")
+        return set()
 
-    # Track sectors already occupied (open positions + today's new entries)
-    fii_selling = fii_net < -500  # FII net sellers by more than 500 Cr
+    fii_selling = fii_net < -500
     if fii_selling:
-        log(f"  ⚠  FII net selling (₹{fii_net:+,.0f} Cr) — BANK/NBFC entries blocked today")
+        log(f"  {label}⚠  FII net selling (₹{fii_net:+,.0f} Cr) — BANK/NBFC blocked")
+
     sector_count = {}
     for sym_open in portfolio["positions"]:
         sec = SECTOR_MAP.get(sym_open)
         if sec:
             sector_count[sec] = sector_count.get(sec, 0) + 1
 
-    entered = 0
+    entered = set()
+    count = 0
     for sig in new_signals:
-        if entered >= slots_free:
+        if count >= slots_free:
             break
-        sym      = sig["symbol"]
+        sym = sig["symbol"]
         entry_px = sig["spot_price"]
         if entry_px <= 0:
             continue
 
-        # Sector cap: skip if sector already at MAX_PER_SECTOR
         sec = SECTOR_MAP.get(sym)
         if sec and sector_count.get(sec, 0) >= MAX_PER_SECTOR:
-            log(f"  — SKIP  {sym:<14} sector {sec} already has {sector_count[sec]} position(s)")
+            log(f"  {label}— SKIP  {sym:<14} sector {sec} already has {sector_count[sec]} position(s)")
             continue
-
-        # FII sell filter: block BANK/NBFC when FII is net selling
         if fii_selling and sec in ("BANK", "NBFC"):
-            log(f"  — SKIP  {sym:<14} FII selling — {sec} blocked")
+            log(f"  {label}— SKIP  {sym:<14} FII selling — {sec} blocked")
             continue
 
         allocated = min(ALLOC_PER_TRADE, portfolio["cash"])
         if allocated < entry_px:
-            log(f"  !! {sym}: not enough cash (need ₹{entry_px:.2f}, have ₹{portfolio['cash']:,.0f})")
+            log(f"  {label}!! {sym}: not enough cash (need ₹{entry_px:.2f}, have ₹{portfolio['cash']:,.0f})")
             continue
-        qty      = int(allocated // entry_px)
+        qty = int(allocated // entry_px)
         if qty == 0:
             continue
         invested = round(qty * entry_px, 2)
-        sl_px    = round(entry_px * (1 - STOP_LOSS_PCT / 100), 2)
-        tgt_px   = round(entry_px * (1 + TARGET_PCT  / 100), 2)
+        sl_px = round(entry_px * (1 - STOP_LOSS_PCT / 100), 2)
+        tgt_px = round(entry_px * (1 + TARGET_PCT / 100), 2)
 
         portfolio["cash"] -= invested
         portfolio["positions"][sym] = {
             "entry_price": entry_px,
-            "quantity":    qty,
-            "invested":    invested,
-            "entry_date":  today,
-            "stop_loss":   sl_px,
-            "target":      tgt_px,
+            "quantity": qty,
+            "invested": invested,
+            "entry_date": today,
+            "stop_loss": sl_px,
+            "target": tgt_px,
             **_entry_storage({
-                "price_chg":   sig.get("price_chg"),
-                "oi_chg":      sig.get("oi_chg"),
-                "vol_ratio":   sig.get("vol_ratio"),
-                "pcr":         sig.get("pcr"),
-                "sector":      sec or "-",
+                "price_chg": sig.get("price_chg"),
+                "oi_chg": sig.get("oi_chg"),
+                "vol_ratio": sig.get("vol_ratio"),
+                "pcr": sig.get("pcr"),
+                "sector": sec or "-",
                 "macro_entry": macro,
             }),
         }
         if sec:
             sector_count[sec] = sector_count.get(sec, 0) + 1
-        entered += 1
-        log(f"  + OPEN  {sym:<14} {qty} sh @ ₹{entry_px:,.2f}"
+        count += 1
+        entered.add(sym)
+        log(f"  {label}+ OPEN  {sym:<14} {qty} sh @ ₹{entry_px:,.2f}"
             f"  invested ₹{invested:,.0f}  SL ₹{sl_px:.2f}  T ₹{tgt_px:.2f}  [{macro}]")
 
-    # ── Step 4: Refresh prices for portfolio value ────────────────────────────
-    all_syms   = list(portfolio["positions"].keys())
+    return entered
+
+
+def enter_confirm_positions(signals, macro, fii_net):
+    """Open shadow positions for EOD Confirm strategy (called at 3:27)."""
+    portfolio = load_portfolio(CONFIRM_PORTFOLIO_FILE)
+    today = datetime.now().strftime("%Y-%m-%d")
+    log("\n  ── Confirm Strategy Entries (3:27) ──")
+    entered = _open_positions(portfolio, signals, macro, fii_net, today, label="[confirm] ")
+    save_portfolio(portfolio, CONFIRM_PORTFOLIO_FILE)
+    return entered
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+def run(intraday_only=False):
+    portfolio = load_portfolio()
+    confirm_pf = load_portfolio(CONFIRM_PORTFOLIO_FILE)
+    signals, macro, fii_net = load_signals()
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    log("=" * 72)
+    log("  PAPER TRADER — ₹10,00,000 Virtual Portfolio")
+    log(f"  Date       : {datetime.now().strftime('%d %b %Y %H:%M IST')}")
+    log(f"  Cash       : ₹{portfolio['cash']:>10,.0f}  |  Open: {len(portfolio['positions'])} positions")
+    log(f"  Confirm    : ₹{confirm_pf['cash']:>10,.0f}  |  Open: {len(confirm_pf['positions'])} positions")
+    log(f"  FII Macro  : {macro}  |  SL: -{STOP_LOSS_PCT}%  Target: +{TARGET_PCT}%  Alloc: ₹{ALLOC_PER_TRADE:,.0f}/trade")
+    log("=" * 72)
+
+    all_syms = list(set(portfolio["positions"]) | set(confirm_pf["positions"]))
+    curr_prices = fetch_prices(all_syms) if all_syms else {}
+
+    log("\n  Checking open positions (baseline)...")
+    if not portfolio["positions"]:
+        log("  (no open baseline positions)")
+    portfolio, _ = _process_exits(portfolio, curr_prices, today)
+
+    log("\n  Checking open positions (confirm)...")
+    if not confirm_pf["positions"]:
+        log("  (no open confirm positions)")
+    confirm_pf, _ = _process_exits(confirm_pf, curr_prices, today, label="confirm")
+
+    if intraday_only:
+        log("  (intraday mode — skipping new entries, SL/target check only)")
+        save_portfolio(portfolio)
+        save_portfolio(confirm_pf, CONFIRM_PORTFOLIO_FILE)
+        all_prices = curr_prices
+        generate_excel(portfolio, all_prices, confirm_pf)
+        log("=" * 72)
+        return
+
+    if macro == "CAUTIOUS":
+        log("  **  MACRO CAUTIOUS — FII net selling. Entering with reduced conviction. **")
+
+    skipped_today = [r["symbol"] for r in signals if r["symbol"] in {
+        t["symbol"] for t in portfolio["closed_trades"] if t["exit_date"] == today
+    }]
+    if skipped_today:
+        log(f"  Skipped (already traded today): {', '.join(skipped_today)}")
+
+    log("\n  ── Baseline Entries (3:15) ──")
+    _open_positions(portfolio, signals, macro, fii_net, today)
+
+    all_syms = list(set(portfolio["positions"]) | set(confirm_pf["positions"]))
     all_prices = fetch_prices(all_syms) if all_syms else {}
-    # Merge with prices fetched earlier (avoid double-fetching)
     all_prices = {**curr_prices, **all_prices}
 
     unrealised  = sum(
@@ -549,8 +711,18 @@ def run(intraday_only=False):
     log("=" * 72)
 
     save_portfolio(portfolio)
-    generate_excel(portfolio, all_prices)
+    save_portfolio(confirm_pf, CONFIRM_PORTFOLIO_FILE)
+    generate_excel(portfolio, all_prices, confirm_pf)
     log("=" * 72)
+
+
+def refresh_excel():
+    """Regenerate trade_log.xlsx from current portfolio state."""
+    portfolio = load_portfolio()
+    confirm_pf = load_portfolio(CONFIRM_PORTFOLIO_FILE)
+    syms = list(set(portfolio["positions"]) | set(confirm_pf["positions"]))
+    prices = fetch_prices(syms) if syms else {}
+    generate_excel(portfolio, prices, confirm_pf)
 
 
 if __name__ == "__main__":

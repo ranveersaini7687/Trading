@@ -122,8 +122,8 @@ class AngelOneAPI:
     # ── Equity LTP quotes ─────────────────────────────────────────────────────
     def get_quotes(self, symbols):
         """
-        Fetch LTP + previous close for a list of NSE equity symbols.
-        Returns: {symbol: {"ltp": float, "prev_close": float}}
+        Fetch LTP + OHLC + volume for a list of NSE equity symbols.
+        Returns: {symbol: {"ltp", "open", "high", "low", "prev_close", "volume"}}
         """
         self.ensure_session()
         if not self._token_map:
@@ -155,6 +155,9 @@ class AngelOneAPI:
                     if sym:
                         results[sym] = {
                             "ltp":        float(item.get("ltp")        or 0),
+                            "open":       float(item.get("open")       or 0),
+                            "high":       float(item.get("high")       or 0),
+                            "low":        float(item.get("low")        or 0),
                             "prev_close": float(item.get("close")      or 0),
                             "volume":     int(item.get("tradeVolume")  or 0),
                         }

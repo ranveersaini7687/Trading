@@ -4,7 +4,8 @@ Bot Runner — Auto-schedules scanner + paper trader during NSE market hours.
 
 Market hours    : 9:15 AM – 3:30 PM IST, Monday–Friday
 Scan interval   : every 5 minutes during market hours
-Post-market scan: starts at 4:40 PM IST, retries every 5 min until bhav copy fetched
+EOD baseline    : 3:15 PM — scanner + baseline entries
+EOD confirm     : 3:27 PM — intraday filter + shadow confirm entries
 
 Usage:
   python3 run_bot.py          # runs forever, Ctrl+C to stop
@@ -19,7 +20,8 @@ from datetime import datetime, timedelta
 
 MARKET_OPEN_H,  MARKET_OPEN_M  =  9, 15
 MARKET_CLOSE_H, MARKET_CLOSE_M = 15, 30
-EOD_SCAN_H,     EOD_SCAN_M     = 15, 15   # 3:15 PM — full scan with live data
+EOD_SCAN_H,     EOD_SCAN_M     = 15, 15   # 3:15 PM — scanner + baseline entries
+EOD_CONFIRM_H,  EOD_CONFIRM_M  = 15, 27   # 3:27 PM — intraday confirm + shadow book
 SCAN_INTERVAL_SEC = 300   # 5 minutes
 
 
@@ -27,23 +29,39 @@ def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+def _minutes_now():
+    now = datetime.now()
+    return now.hour * 60 + now.minute
+
+
 def is_market_open():
     now = datetime.now()
     if now.weekday() >= 5:
         return False
-    t = now.hour * 60 + now.minute
+    t = _minutes_now()
     open_t  = MARKET_OPEN_H  * 60 + MARKET_OPEN_M
     close_t = MARKET_CLOSE_H * 60 + MARKET_CLOSE_M
     return open_t <= t <= close_t
 
 
 def is_eod_scan_time():
-    """True from 3:15 PM onwards during market hours on weekdays."""
+    """True from 3:15 PM until 3:27 PM (baseline scan window)."""
     now = datetime.now()
     if now.weekday() >= 5:
         return False
-    t = now.hour * 60 + now.minute
-    return t >= EOD_SCAN_H * 60 + EOD_SCAN_M
+    t = _minutes_now()
+    scan_t = EOD_SCAN_H * 60 + EOD_SCAN_M
+    confirm_t = EOD_CONFIRM_H * 60 + EOD_CONFIRM_M
+    return scan_t <= t < confirm_t
+
+
+def is_eod_confirm_time():
+    """True from 3:27 PM until market close."""
+    now = datetime.now()
+    if now.weekday() >= 5:
+        return False
+    t = _minutes_now()
+    return t >= EOD_CONFIRM_H * 60 + EOD_CONFIRM_M
 
 
 def seconds_until_open():
@@ -57,34 +75,47 @@ def seconds_until_open():
 
 
 def run_intraday_check():
-    """Every 5-min intraday: only check SL/target on open positions."""
+    """Every 5-min intraday: SL/target on baseline + confirm portfolios."""
     import importlib
     import paper_trader
     importlib.reload(paper_trader)
 
-    log("── SL/Target Check ──────────────────────────")
+    log("── SL/Target Check (baseline + confirm) ─────")
     paper_trader.run(intraday_only=True)
     log("── Cycle complete ───────────────────────────")
 
 
-def run_cycle(notify=False):
-    """Post-market: full scanner + enter positions + optional WhatsApp."""
+def run_eod_scan():
+    """3:15 PM: scanner + baseline entries + save shortlist."""
     import importlib
     import long_buildup_scanner
     import paper_trader
-    import run_once
+    import eod_confirm
     importlib.reload(long_buildup_scanner)
     importlib.reload(paper_trader)
+    importlib.reload(eod_confirm)
+
+    log("── EOD Scan (3:15) — Scanner + Baseline ─────")
+    long_buildup_scanner.scan()
+    paper_trader.run()
+    eod_confirm.save_shortlist()
+    log("── EOD scan phase complete ──────────────────")
+
+
+def run_eod_confirm(notify=False):
+    """3:27 PM: intraday confirm filters + shadow entries + Excel + WhatsApp."""
+    import importlib
+    import eod_confirm
+    import run_once
+    importlib.reload(eod_confirm)
     importlib.reload(run_once)
 
-    log("── Scanner ──────────────────────────────────")
-    long_buildup_scanner.scan()
-    log("── Paper Trader ─────────────────────────────")
-    paper_trader.run()
+    log("── EOD Confirm (3:27) — Intraday filters ───")
+    eod_confirm.run_confirm()
     if notify:
         log("── Sending WhatsApp summary ─────────────────")
         run_once.send_whatsapp(run_once.build_summary())
-    log("── Cycle complete ───────────────────────────")
+    log("── EOD confirm phase complete ─────────────────")
 
 
 def main():
@@ -94,22 +125,43 @@ def main():
     log("  AUTO TRADER BOT — Starting up")
     log(f"  Market hours : {MARKET_OPEN_H:02d}:{MARKET_OPEN_M:02d} – "
         f"{MARKET_CLOSE_H:02d}:{MARKET_CLOSE_M:02d} IST  Mon–Fri")
-    log(f"  EOD scan     : {EOD_SCAN_H:02d}:{EOD_SCAN_M:02d} IST (Angel One live data, enter positions)")
+    log(f"  EOD baseline : {EOD_SCAN_H:02d}:{EOD_SCAN_M:02d} IST (scanner + baseline entries)")
+    log(f"  EOD confirm  : {EOD_CONFIRM_H:02d}:{EOD_CONFIRM_M:02d} IST (intraday filter + shadow book)")
     log(f"  Scan interval: every {SCAN_INTERVAL_SEC // 60} minutes (SL/target check)")
     log("  Press Ctrl+C to stop")
     log("=" * 60)
 
     eod_scan_done_date = None
+    eod_confirm_done_date = None
 
     while True:
         today = datetime.now().strftime("%Y-%m-%d")
 
         if is_market_open():
-            if is_eod_scan_time() and eod_scan_done_date != today:
-                # ── 3:15 PM: full scan + enter positions + WhatsApp ─
-                log(f"  EOD scan triggered ({EOD_SCAN_H:02d}:{EOD_SCAN_M:02d}) — running full cycle...")
+            if is_eod_confirm_time() and eod_confirm_done_date != today:
+                if eod_scan_done_date != today:
+                    log("  Confirm due but scan not run — running 3:15 scan first...")
+                    try:
+                        run_eod_scan()
+                        eod_scan_done_date = today
+                    except KeyboardInterrupt:
+                        raise
+                    except Exception:
+                        log("  !! EOD scan failed:")
+                        traceback.print_exc()
                 try:
-                    run_cycle(notify=True)
+                    run_eod_confirm(notify=True)
+                    eod_confirm_done_date = today
+                    log("  EOD confirm complete ✓")
+                except KeyboardInterrupt:
+                    raise
+                except Exception:
+                    log("  !! EOD confirm failed:")
+                    traceback.print_exc()
+            elif is_eod_scan_time() and eod_scan_done_date != today:
+                log(f"  EOD scan triggered ({EOD_SCAN_H:02d}:{EOD_SCAN_M:02d})...")
+                try:
+                    run_eod_scan()
                     eod_scan_done_date = today
                     log("  EOD scan complete ✓")
                 except KeyboardInterrupt:
@@ -118,7 +170,6 @@ def main():
                     log("  !! EOD scan failed:")
                     traceback.print_exc()
             else:
-                # ── Before 3:15 PM: SL/target check only ───────────
                 try:
                     run_intraday_check()
                 except KeyboardInterrupt:
@@ -136,14 +187,13 @@ def main():
             time.sleep(SCAN_INTERVAL_SEC)
 
         else:
-            # ── Sleep until market open ────────────────────────────
             now  = datetime.now()
             secs = seconds_until_open()
             h, m = divmod(secs // 60, 60)
 
             if now.weekday() >= 5:
                 reason = f"Weekend ({['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][now.weekday()]})"
-            elif now.hour * 60 + now.minute < MARKET_OPEN_H * 60 + MARKET_OPEN_M:
+            elif _minutes_now() < MARKET_OPEN_H * 60 + MARKET_OPEN_M:
                 reason = "Pre-market"
             else:
                 reason = "Market closed"
