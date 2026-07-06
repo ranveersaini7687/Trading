@@ -226,6 +226,8 @@ def generate_excel(portfolio, all_prices):
             })
         all_rows = open_rows + closed_rows
         df = pd.DataFrame(all_rows, columns=ALL_TRADES_COLUMNS)
+        df["_sort"] = pd.to_datetime(df["Entry Date"], errors="coerce")
+        df = df.sort_values("_sort", ascending=False).drop(columns="_sort").reset_index(drop=True)
         df.to_excel(writer, sheet_name="All Trades", index=False)
 
         # ── Sheet 2: Open Positions ───────────────────────────────────────────
@@ -247,7 +249,11 @@ def generate_excel(portfolio, all_prices):
                 "SL ₹":          pos["stop_loss"],
                 "Target ₹":      pos["target"],
             })
-        pd.DataFrame(rows).to_excel(writer, sheet_name="Open Positions", index=False)
+        open_df = pd.DataFrame(rows)
+        if not open_df.empty:
+            open_df["_sort"] = pd.to_datetime(open_df["Entry Date"], errors="coerce")
+            open_df = open_df.sort_values("_sort", ascending=False).drop(columns="_sort").reset_index(drop=True)
+        open_df.to_excel(writer, sheet_name="Open Positions", index=False)
 
         # ── Sheet 3: Daily P&L ────────────────────────────────────────────────
         if trades:
