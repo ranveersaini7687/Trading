@@ -74,6 +74,36 @@ def seconds_until_open():
     return max(0, int((nxt - now).total_seconds()))
 
 
+def wait_until_confirm():
+    """Block until 3:27 PM so confirm is not skipped by the 5-min poll gap."""
+    now = datetime.now()
+    target = now.replace(hour=EOD_CONFIRM_H, minute=EOD_CONFIRM_M, second=0, microsecond=0)
+    if now >= target:
+        return
+    secs = int((target - now).total_seconds())
+    log(f"  Waiting until {EOD_CONFIRM_H:02d}:{EOD_CONFIRM_M:02d} for confirm ({secs // 60}m {secs % 60}s)...")
+    time.sleep(secs)
+
+
+def _shortlist_pending_confirm():
+    """True if today's shortlist exists but confirm log was never written."""
+    import json
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "eod_shortlist.json")
+    if not os.path.exists(path):
+        return False
+    today = datetime.now().strftime("%Y-%m-%d")
+    with open(path) as f:
+        data = json.load(f)
+    if data.get("date") != today:
+        return False
+    log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "eod_confirm_log.json")
+    if not os.path.exists(log_path):
+        return True
+    with open(log_path) as f:
+        log_data = json.load(f)
+    return not any(e.get("date") == today for e in log_data.get("entries", []))
+
+
 def run_intraday_check():
     """Every 5-min intraday: SL/target on baseline + confirm portfolios."""
     import importlib
@@ -118,6 +148,13 @@ def run_eod_confirm(notify=False):
     log("── EOD confirm phase complete ─────────────────")
 
 
+def run_eod_full_cycle(notify=False):
+    """3:15 scan → wait until 3:27 → confirm (avoids missing confirm window)."""
+    run_eod_scan()
+    wait_until_confirm()
+    run_eod_confirm(notify=notify)
+
+
 def main():
     once = "--once" in sys.argv
 
@@ -138,9 +175,21 @@ def main():
         today = datetime.now().strftime("%Y-%m-%d")
 
         if is_market_open():
-            if is_eod_confirm_time() and eod_confirm_done_date != today:
+            if is_eod_scan_time() and eod_scan_done_date != today:
+                log(f"  EOD full cycle triggered ({EOD_SCAN_H:02d}:{EOD_SCAN_M:02d} → {EOD_CONFIRM_H:02d}:{EOD_CONFIRM_M:02d})...")
+                try:
+                    run_eod_full_cycle(notify=True)
+                    eod_scan_done_date = today
+                    eod_confirm_done_date = today
+                    log("  EOD full cycle complete ✓")
+                except KeyboardInterrupt:
+                    raise
+                except Exception:
+                    log("  !! EOD full cycle failed:")
+                    traceback.print_exc()
+            elif is_eod_confirm_time() and eod_confirm_done_date != today:
                 if eod_scan_done_date != today:
-                    log("  Confirm due but scan not run — running 3:15 scan first...")
+                    log("  Confirm due but scan not run — running scan first...")
                     try:
                         run_eod_scan()
                         eod_scan_done_date = today
@@ -157,17 +206,6 @@ def main():
                     raise
                 except Exception:
                     log("  !! EOD confirm failed:")
-                    traceback.print_exc()
-            elif is_eod_scan_time() and eod_scan_done_date != today:
-                log(f"  EOD scan triggered ({EOD_SCAN_H:02d}:{EOD_SCAN_M:02d})...")
-                try:
-                    run_eod_scan()
-                    eod_scan_done_date = today
-                    log("  EOD scan complete ✓")
-                except KeyboardInterrupt:
-                    raise
-                except Exception:
-                    log("  !! EOD scan failed:")
                     traceback.print_exc()
             else:
                 try:
