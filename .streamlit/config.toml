@@ -3,3 +3,9 @@ gatherUsageStats = false
 
 [server]
 headless = true
+enableCORS = false
+enableXsrfProtection = false
+
+[client]
+showErrorDetails = true
+toolbarMode = "minimal"

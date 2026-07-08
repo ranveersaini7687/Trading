@@ -7,7 +7,6 @@ Run:  streamlit run dashboard.py --server.address 0.0.0.0 --server.port 8501
 
 import json
 import os
-import subprocess
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -308,6 +307,7 @@ def _open_positions_df(portfolio, prices):
 
 @st.cache_data(ttl=60)
 def _fetch_prices(symbols):
+    """Optional live prices — never block the UI if Angel One is slow."""
     if not symbols:
         return {}
     try:
@@ -317,229 +317,246 @@ def _fetch_prices(symbols):
         return {}
 
 
-# ── Header ────────────────────────────────────────────────────────────────────
-col_h, col_r = st.columns([5, 1])
-with col_h:
-    st.markdown('<div class="vibe-header">auto-trader</div>', unsafe_allow_html=True)
-    st.markdown('<div class="vibe-sub">paper trading · nse long buildup · live ops</div>', unsafe_allow_html=True)
-with col_r:
-    if st.button("↻ refresh", use_container_width=True):
-        st.cache_data.clear()
-        st.rerun()
-
-today = datetime.now().strftime("%Y-%m-%d")
-data = load_data()
-status = data["status"]
-portfolio = data["portfolio"]
-confirm_pf = data["confirm"]
-scan = data["scan"]
-macro = scan.get("macro", {})
-summary = scan.get("summary", {})
-
-dot_cls, dot_msg, _ = _heartbeat(status)
-phase = status.get("phase", "unknown")
-market_open = status.get("market_open", False)
-
-# ── Top status bar ────────────────────────────────────────────────────────────
-c1, c2, c3, c4, c5 = st.columns(5)
-with c1:
-    st.markdown(_metric_card("bot", f'<span class="status-dot {dot_cls}"></span>{dot_msg}', "accent"), unsafe_allow_html=True)
-with c2:
-    st.markdown(_metric_card("phase", phase.replace("_", " "), ""), unsafe_allow_html=True)
-with c3:
-    mkt = "MARKET OPEN" if market_open else "CLOSED"
-    st.markdown(_metric_card("session", mkt, "accent" if market_open else ""), unsafe_allow_html=True)
-with c4:
-    sent = macro.get("sentiment", "—")
-    sc = "pos" if sent == "BULLISH" else ("neg" if sent == "BEARISH" else "")
-    fii = macro.get("fii_net_cr", 0)
-    st.markdown(_metric_card("macro", f"{sent}<br><span style='font-size:0.75rem;color:#71717a'>FII ₹{fii:+,.0f} Cr</span>", sc), unsafe_allow_html=True)
-with c5:
-    err = status.get("last_error")
-    err_disp = (err[:40] + "…") if err and len(err) > 40 else (err or "none")
-    st.markdown(_metric_card("last error", err_disp, "neg" if err else ""), unsafe_allow_html=True)
-
-# ── Tabs ──────────────────────────────────────────────────────────────────────
-tab_ops, tab_trade, tab_strat = st.tabs(["◈ operations", "◈ trading", "◈ strategy"])
-
-# ── OPERATIONS ────────────────────────────────────────────────────────────────
-with tab_ops:
-    o1, o2 = st.columns([1, 1])
-    with o1:
-        st.markdown("#### today's pipeline")
-        st.markdown(_timeline_html(today), unsafe_allow_html=True)
-
-        st.markdown("#### activity feed")
-        for ev in data["activity"]:
-            ts = ev.get("ts", "")[11:19]
-            etype = ev.get("type", "")
-            cls = f"type-{etype}" if etype in ("trade", "eod", "error") else ""
-            st.markdown(
-                f'<div class="event-row"><span class="ts">{ts}</span>'
-                f'<span class="{cls}">[{etype}]</span> {ev.get("msg", "")}</div>',
-                unsafe_allow_html=True,
-            )
-        if not data["activity"]:
-            st.caption("no events yet — starts when run_bot.py runs on VM")
-
-    with o2:
-        st.markdown("#### scanner funnel")
-        if summary:
-            st.plotly_chart(_funnel_chart(summary), use_container_width=True)
-            st.caption(f"last scan: {scan.get('scan_time', '—')[:19].replace('T', ' ')}")
-        else:
-            st.info("no scan data — waiting for 3:15 PM run")
-
-        st.markdown("#### file freshness")
-        files = [
-            ("scan_results.json", "Scanner"),
-            ("paper_portfolio.json", "Portfolio"),
-            ("trade_log.xlsx", "Excel"),
-            ("eod_shortlist.json", "Shortlist"),
-            ("eod_confirm_log.json", "Confirm log"),
-        ]
-        fres = [{"File": label, "Age (min)": bot_status.file_age_minutes(p) or "—"} for p, label in files]
-        st.dataframe(pd.DataFrame(fres), hide_index=True, use_container_width=True)
-
-        if status.get("next_wake_at"):
-            st.caption(f"next wake ~{status.get('next_wake_at')} · phase {phase}")
-
-# ── TRADING ───────────────────────────────────────────────────────────────────
-with tab_trade:
-    closed = portfolio.get("closed_trades", [])
-    positions = portfolio.get("positions", {})
-    cash = portfolio.get("cash", 0)
-    capital = portfolio.get("total_capital", 1_000_000)
-    syms = list(positions.keys())
-    prices = _fetch_prices(tuple(syms))
-
-    realised = sum(t.get("pnl_abs", 0) for t in closed)
-    unrealised = sum(
-        ((prices.get(s) or p["entry_price"]) - p["entry_price"]) * p["quantity"]
-        for s, p in positions.items()
+def _style_pnl_df(df):
+    """Color P&L columns; compatible with pandas 1.x and 2.x."""
+    styled = df.style.format({
+        "Entry": "{:.2f}", "CMP": "{:.2f}", "P&L ₹": "{:,.0f}",
+        "P&L %": "{:.2f}", "→ SL %": "{:.2f}", "→ Tgt %": "{:.2f}",
+    })
+    fn = lambda v: (
+        "color: #4ade80" if isinstance(v, (int, float)) and v > 0
+        else ("color: #f87171" if isinstance(v, (int, float)) and v < 0 else "")
     )
-    invested = sum(p["invested"] for p in positions.values())
-    port_val = cash + invested + unrealised
-    total_pnl = port_val - capital
-    wins = sum(1 for t in closed if t.get("pnl_abs", 0) > 0)
-    losses = len(closed) - wins
-    wr = round(wins / len(closed) * 100) if closed else 0
+    if hasattr(styled, "map"):
+        return styled.map(fn, subset=["P&L ₹", "P&L %"])
+    return styled.applymap(fn, subset=["P&L ₹", "P&L %"])
 
-    t1, t2, t3, t4, t5, t6 = st.columns(6)
-    t1.markdown(_metric_card("portfolio", _fmt_inr(port_val), ""), unsafe_allow_html=True)
-    t2.markdown(_metric_card("total p&l", _fmt_inr(total_pnl, signed=True),
-                             "pos" if total_pnl >= 0 else "neg"), unsafe_allow_html=True)
-    t3.markdown(_metric_card("realised", _fmt_inr(realised, signed=True),
-                             "pos" if realised >= 0 else "neg"), unsafe_allow_html=True)
-    t4.markdown(_metric_card("unrealised", _fmt_inr(unrealised, signed=True),
-                             "pos" if unrealised >= 0 else "neg"), unsafe_allow_html=True)
-    t5.markdown(_metric_card("open slots", f"{len(positions)} / 10", "accent"), unsafe_allow_html=True)
-    t6.markdown(_metric_card("win rate", f"{wr}%", ""), unsafe_allow_html=True)
 
-    tr1, tr2 = st.columns([1.2, 1])
-    with tr1:
-        st.markdown("#### open positions")
-        odf = _open_positions_df(portfolio, prices)
-        if not odf.empty:
-            st.dataframe(
-                odf.style.format({
-                    "Entry": "{:.2f}", "CMP": "{:.2f}", "P&L ₹": "{:,.0f}",
-                    "P&L %": "{:.2f}", "→ SL %": "{:.2f}", "→ Tgt %": "{:.2f}",
-                }).map(
-                    lambda v: "color: #4ade80" if isinstance(v, (int, float)) and v > 0
-                    else ("color: #f87171" if isinstance(v, (int, float)) and v < 0 else ""),
-                    subset=["P&L ₹", "P&L %"],
-                ),
-                hide_index=True,
-                use_container_width=True,
-                height=min(42 * len(odf) + 38, 400),
-            )
-        else:
-            st.caption("no open positions")
+def main():
+    # ── Header ────────────────────────────────────────────────────────────────
+    col_h, col_r = st.columns([5, 1])
+    with col_h:
+        st.markdown('<div class="vibe-header">auto-trader</div>', unsafe_allow_html=True)
+        st.markdown('<div class="vibe-sub">paper trading · nse long buildup · live ops</div>', unsafe_allow_html=True)
+    with col_r:
+        if st.button("↻ refresh", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
 
-        st.markdown("#### closed trades")
-        if closed:
-            cdf = pd.DataFrame(closed).sort_values("exit_date", ascending=False)
-            show_cols = ["symbol", "entry_date", "exit_date", "entry_price", "exit_price",
-                         "pnl_abs", "pnl_pct", "reason", "hold_days", "oi_chg", "price_chg", "sector"]
-            show_cols = [c for c in show_cols if c in cdf.columns]
-            st.dataframe(cdf[show_cols].head(30), hide_index=True, use_container_width=True)
-        else:
-            st.caption("no closed trades yet")
+    today = datetime.now().strftime("%Y-%m-%d")
+    data = load_data()
+    status = data["status"]
+    portfolio = data["portfolio"]
+    confirm_pf = data["confirm"]
+    scan = data["scan"]
+    macro = scan.get("macro", {})
+    summary = scan.get("summary", {})
 
-    with tr2:
-        st.markdown("#### equity curve")
-        fig = _equity_curve(closed)
-        if fig:
-            st.plotly_chart(fig, use_container_width=True)
+    dot_cls, dot_msg, _ = _heartbeat(status)
+    phase = status.get("phase", "unknown")
+    market_open = status.get("market_open", False)
 
-        closed_today = [t for t in closed if t.get("exit_date") == today]
-        if closed_today:
-            st.markdown("#### today")
-            for t in closed_today:
-                sign = "+" if t["pnl_abs"] >= 0 else ""
-                col = "#4ade80" if t["pnl_abs"] >= 0 else "#f87171"
+    # ── Top status bar ────────────────────────────────────────────────────────
+    c1, c2, c3, c4, c5 = st.columns(5)
+    with c1:
+        st.markdown(_metric_card("bot", f'<span class="status-dot {dot_cls}"></span>{dot_msg}', "accent"), unsafe_allow_html=True)
+    with c2:
+        st.markdown(_metric_card("phase", phase.replace("_", " "), ""), unsafe_allow_html=True)
+    with c3:
+        mkt = "MARKET OPEN" if market_open else "CLOSED"
+        st.markdown(_metric_card("session", mkt, "accent" if market_open else ""), unsafe_allow_html=True)
+    with c4:
+        sent = macro.get("sentiment", "—")
+        sc = "pos" if sent == "BULLISH" else ("neg" if sent == "BEARISH" else "")
+        fii = macro.get("fii_net_cr", 0)
+        st.markdown(_metric_card("macro", f"{sent}<br><span style='font-size:0.75rem;color:#71717a'>FII ₹{fii:+,.0f} Cr</span>", sc), unsafe_allow_html=True)
+    with c5:
+        err = status.get("last_error")
+        err_disp = (err[:40] + "…") if err and len(err) > 40 else (err or "none")
+        st.markdown(_metric_card("last error", err_disp, "neg" if err else ""), unsafe_allow_html=True)
+
+    # ── Tabs ────────────────────────────────────────────────────────────────
+    tab_ops, tab_trade, tab_strat = st.tabs(["◈ operations", "◈ trading", "◈ strategy"])
+
+    # ── OPERATIONS ────────────────────────────────────────────────────────────
+    with tab_ops:
+        o1, o2 = st.columns([1, 1])
+        with o1:
+            st.markdown("#### today's pipeline")
+            st.markdown(_timeline_html(today), unsafe_allow_html=True)
+
+            st.markdown("#### activity feed")
+            for ev in data["activity"]:
+                ts = ev.get("ts", "")[11:19]
+                etype = ev.get("type", "")
+                cls = f"type-{etype}" if etype in ("trade", "eod", "error") else ""
                 st.markdown(
-                    f"<span style='font-family:JetBrains Mono;font-size:0.75rem;color:{col}'>"
-                    f"{t['symbol']} {sign}₹{t['pnl_abs']:,.0f} [{t['reason']}]</span>",
+                    f'<div class="event-row"><span class="ts">{ts}</span>'
+                    f'<span class="{cls}">[{etype}]</span> {ev.get("msg", "")}</div>',
                     unsafe_allow_html=True,
                 )
+            if not data["activity"]:
+                st.caption("no events yet — starts when run_bot.py runs on VM")
 
-# ── STRATEGY ─────────────────────────────────────────────────────────────────
-with tab_strat:
-    s1, s2 = st.columns(2)
+        with o2:
+            st.markdown("#### scanner funnel")
+            if summary:
+                st.plotly_chart(_funnel_chart(summary), use_container_width=True)
+                st.caption(f"last scan: {scan.get('scan_time', '—')[:19].replace('T', ' ')}")
+            else:
+                st.info("no scan data — waiting for 3:15 PM run")
 
-    with s1:
-        st.markdown("#### baseline vs confirm")
-        b_open = len(portfolio.get("positions", {}))
-        c_open = len(confirm_pf.get("positions", {}))
-        b_closed = len(portfolio.get("closed_trades", []))
-        c_closed = len(confirm_pf.get("closed_trades", []))
-        b_pnl = sum(t.get("pnl_abs", 0) for t in portfolio.get("closed_trades", []))
-        c_pnl = sum(t.get("pnl_abs", 0) for t in confirm_pf.get("closed_trades", []))
+            st.markdown("#### file freshness")
+            files = [
+                ("scan_results.json", "Scanner"),
+                ("paper_portfolio.json", "Portfolio"),
+                ("trade_log.xlsx", "Excel"),
+                ("eod_shortlist.json", "Shortlist"),
+                ("eod_confirm_log.json", "Confirm log"),
+            ]
+            fres = [{"File": label, "Age (min)": bot_status.file_age_minutes(p) or "—"} for p, label in files]
+            st.dataframe(pd.DataFrame(fres), hide_index=True, use_container_width=True)
 
-        cmp_df = pd.DataFrame([
-            {"Book": "Baseline (3:15)", "Open": b_open, "Closed": b_closed, "Realised P&L": b_pnl},
-            {"Book": "Confirm (3:27)", "Open": c_open, "Closed": c_closed, "Realised P&L": c_pnl},
-        ])
-        st.dataframe(
-            cmp_df.style.format({"Realised P&L": "₹{:+,.0f}"}),
-            hide_index=True,
-            use_container_width=True,
+            if status.get("next_wake_at"):
+                st.caption(f"next wake ~{status.get('next_wake_at')} · phase {phase}")
+
+    # ── TRADING ───────────────────────────────────────────────────────────────
+    with tab_trade:
+        closed = portfolio.get("closed_trades", [])
+        positions = portfolio.get("positions", {})
+        cash = portfolio.get("cash", 0)
+        capital = portfolio.get("total_capital", 1_000_000)
+        syms = list(positions.keys())
+
+        live_prices = st.checkbox("Fetch live CMP (Angel One)", value=False)
+        prices = _fetch_prices(tuple(syms)) if live_prices and syms else {}
+
+        realised = sum(t.get("pnl_abs", 0) for t in closed)
+        unrealised = sum(
+            ((prices.get(s) or p["entry_price"]) - p["entry_price"]) * p["quantity"]
+            for s, p in positions.items()
         )
+        invested = sum(p["invested"] for p in positions.values())
+        port_val = cash + invested + unrealised
+        total_pnl = port_val - capital
+        wins = sum(1 for t in closed if t.get("pnl_abs", 0) > 0)
+        wr = round(wins / len(closed) * 100) if closed else 0
 
-        signals = scan.get("results", [])
-        if signals:
-            st.markdown("#### today's scanner matches")
-            sdf = pd.DataFrame(signals)
-            cols = [c for c in ["symbol", "price_chg", "oi_chg", "vol_ratio", "pcr", "spot_price"] if c in sdf.columns]
-            st.dataframe(sdf[cols], hide_index=True, use_container_width=True)
-        else:
-            st.caption("no scanner matches today")
+        t1, t2, t3, t4, t5, t6 = st.columns(6)
+        t1.markdown(_metric_card("portfolio", _fmt_inr(port_val), ""), unsafe_allow_html=True)
+        t2.markdown(_metric_card("total p&l", _fmt_inr(total_pnl, signed=True),
+                                 "pos" if total_pnl >= 0 else "neg"), unsafe_allow_html=True)
+        t3.markdown(_metric_card("realised", _fmt_inr(realised, signed=True),
+                                 "pos" if realised >= 0 else "neg"), unsafe_allow_html=True)
+        t4.markdown(_metric_card("unrealised", _fmt_inr(unrealised, signed=True),
+                                 "pos" if unrealised >= 0 else "neg"), unsafe_allow_html=True)
+        t5.markdown(_metric_card("open slots", f"{len(positions)} / 10", "accent"), unsafe_allow_html=True)
+        t6.markdown(_metric_card("win rate", f"{wr}%", ""), unsafe_allow_html=True)
 
-    with s2:
-        st.markdown("#### eod confirm log")
-        entries = data["confirm_log"].get("entries", [])
-        today_entries = [e for e in entries if e.get("date") == today]
-        if today_entries:
-            edf = pd.DataFrame(today_entries)
-            show = [c for c in [
-                "symbol", "confirm_pass", "vol_ratio_scan", "vol_ratio_confirm",
-                "close_gt_open", "near_day_high", "baseline_entered", "confirm_entered", "fail_reason",
-            ] if c in edf.columns]
-            st.dataframe(edf[show], hide_index=True, use_container_width=True)
-        elif entries:
-            st.dataframe(pd.DataFrame(entries).tail(10), hide_index=True, use_container_width=True)
-            st.caption("no confirm entries for today")
-        else:
-            st.caption("confirm log empty — runs at 3:27 PM")
+        tr1, tr2 = st.columns([1.2, 1])
+        with tr1:
+            st.markdown("#### open positions")
+            odf = _open_positions_df(portfolio, prices)
+            if not odf.empty:
+                st.dataframe(
+                    _style_pnl_df(odf),
+                    hide_index=True,
+                    use_container_width=True,
+                    height=min(42 * len(odf) + 38, 400),
+                )
+            else:
+                st.caption("no open positions")
 
-        if summary:
-            st.markdown("#### entry signal snapshot")
-            st.json({
-                "criteria": scan.get("criteria", {}),
-                "macro": macro,
-                "funnel": summary,
-            })
+            st.markdown("#### closed trades")
+            if closed:
+                cdf = pd.DataFrame(closed).sort_values("exit_date", ascending=False)
+                show_cols = ["symbol", "entry_date", "exit_date", "entry_price", "exit_price",
+                             "pnl_abs", "pnl_pct", "reason", "hold_days", "oi_chg", "price_chg", "sector"]
+                show_cols = [c for c in show_cols if c in cdf.columns]
+                st.dataframe(cdf[show_cols].head(30), hide_index=True, use_container_width=True)
+            else:
+                st.caption("no closed trades yet")
 
-st.caption(f"◈ {datetime.now().strftime('%d %b %Y %H:%M:%S IST')} · auto-refresh cache 30s")
+        with tr2:
+            st.markdown("#### equity curve")
+            fig = _equity_curve(closed)
+            if fig:
+                st.plotly_chart(fig, use_container_width=True)
+
+            closed_today = [t for t in closed if t.get("exit_date") == today]
+            if closed_today:
+                st.markdown("#### today")
+                for t in closed_today:
+                    sign = "+" if t["pnl_abs"] >= 0 else ""
+                    col = "#4ade80" if t["pnl_abs"] >= 0 else "#f87171"
+                    st.markdown(
+                        f"<span style='font-family:JetBrains Mono;font-size:0.75rem;color:{col}'>"
+                        f"{t['symbol']} {sign}₹{t['pnl_abs']:,.0f} [{t['reason']}]</span>",
+                        unsafe_allow_html=True,
+                    )
+
+    # ── STRATEGY ────────────────────────────────────────────────────────────
+    with tab_strat:
+        s1, s2 = st.columns(2)
+
+        with s1:
+            st.markdown("#### baseline vs confirm")
+            b_open = len(portfolio.get("positions", {}))
+            c_open = len(confirm_pf.get("positions", {}))
+            b_closed = len(portfolio.get("closed_trades", []))
+            c_closed = len(confirm_pf.get("closed_trades", []))
+            b_pnl = sum(t.get("pnl_abs", 0) for t in portfolio.get("closed_trades", []))
+            c_pnl = sum(t.get("pnl_abs", 0) for t in confirm_pf.get("closed_trades", []))
+
+            cmp_df = pd.DataFrame([
+                {"Book": "Baseline (3:15)", "Open": b_open, "Closed": b_closed, "Realised P&L": b_pnl},
+                {"Book": "Confirm (3:27)", "Open": c_open, "Closed": c_closed, "Realised P&L": c_pnl},
+            ])
+            st.dataframe(
+                cmp_df.style.format({"Realised P&L": "₹{:+,.0f}"}),
+                hide_index=True,
+                use_container_width=True,
+            )
+
+            signals = scan.get("results", [])
+            if signals:
+                st.markdown("#### today's scanner matches")
+                sdf = pd.DataFrame(signals)
+                cols = [c for c in ["symbol", "price_chg", "oi_chg", "vol_ratio", "pcr", "spot_price"] if c in sdf.columns]
+                st.dataframe(sdf[cols], hide_index=True, use_container_width=True)
+            else:
+                st.caption("no scanner matches today")
+
+        with s2:
+            st.markdown("#### eod confirm log")
+            entries = data["confirm_log"].get("entries", [])
+            today_entries = [e for e in entries if e.get("date") == today]
+            if today_entries:
+                edf = pd.DataFrame(today_entries)
+                show = [c for c in [
+                    "symbol", "confirm_pass", "vol_ratio_scan", "vol_ratio_confirm",
+                    "close_gt_open", "near_day_high", "baseline_entered", "confirm_entered", "fail_reason",
+                ] if c in edf.columns]
+                st.dataframe(edf[show], hide_index=True, use_container_width=True)
+            elif entries:
+                st.dataframe(pd.DataFrame(entries).tail(10), hide_index=True, use_container_width=True)
+                st.caption("no confirm entries for today")
+            else:
+                st.caption("confirm log empty — runs at 3:27 PM")
+
+            if summary:
+                st.markdown("#### entry signal snapshot")
+                st.json({
+                    "criteria": scan.get("criteria", {}),
+                    "macro": macro,
+                    "funnel": summary,
+                })
+
+    st.caption(f"◈ {datetime.now().strftime('%d %b %Y %H:%M:%S IST')} · cache 30s · live prices opt-in")
+
+
+try:
+    main()
+except Exception as exc:
+    st.error("Dashboard error — page will stay up; details below:")
+    st.exception(exc)
