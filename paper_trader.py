@@ -570,6 +570,12 @@ def _process_exits(portfolio, curr_prices, today, label=""):
         })
         sign = "+" if pnl_abs >= 0 else ""
         log(f"  ✗ {prefix}CLOSED {sym:<14} Exit ₹{exit_px:.2f}  P&L ₹{sign}{pnl_abs:,.0f} ({sign}{pnl_pct:.2f}%)  [{reason}]")
+        try:
+            import bot_status
+            bot_status.log_activity("trade", f"CLOSED {sym} [{reason}] P&L ₹{sign}{pnl_abs:,.0f}",
+                                    symbol=sym, pnl=pnl_abs, reason=reason)
+        except Exception:
+            pass
 
     return portfolio, len(to_close)
 
@@ -661,6 +667,12 @@ def _open_positions(portfolio, signals, macro, fii_net, today, label=""):
         entered.add(sym)
         log(f"  {label}+ OPEN  {sym:<14} {qty} sh @ ₹{entry_px:,.2f}"
             f"  invested ₹{invested:,.0f}  SL ₹{sl_px:.2f}  T ₹{tgt_px:.2f}  [{macro}]")
+        try:
+            import bot_status
+            bot_status.log_activity("trade", f"OPEN {sym} {qty}sh @ ₹{entry_px:,.2f} [{macro}]",
+                                    symbol=sym, qty=qty, price=entry_px)
+        except Exception:
+            pass
 
     return entered
 

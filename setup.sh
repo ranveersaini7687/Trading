@@ -29,13 +29,17 @@ echo ">>> Edit .env with your Twilio credentials:"
 echo "    nano ~/auto-trader/.env"
 echo ""
 
-# Install and start systemd service
+# Install and start systemd services
 sudo cp auto-trader.service /etc/systemd/system/
+sudo cp dashboard.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable auto-trader
 sudo systemctl start auto-trader
+sudo systemctl enable dashboard
+sudo systemctl start dashboard
 
 echo ""
 echo "=== Done! ==="
 echo "Check status : sudo systemctl status auto-trader"
 echo "Live logs    : sudo journalctl -u auto-trader -f"
+echo "Dashboard    : http://<vm-ip>:8501  (sudo systemctl status dashboard)"

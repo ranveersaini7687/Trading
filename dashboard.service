@@ -1,0 +1,17 @@
+[Unit]
+Description=Auto Trader Dashboard (Streamlit)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/auto-trader
+EnvironmentFile=/home/ubuntu/auto-trader/.env
+ExecStart=/home/ubuntu/auto-trader/venv/bin/streamlit run dashboard.py --server.address 0.0.0.0 --server.port 8501 --server.headless true
+Restart=on-failure
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

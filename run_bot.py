@@ -18,6 +18,8 @@ import time
 import traceback
 from datetime import datetime, timedelta
 
+import bot_status
+
 MARKET_OPEN_H,  MARKET_OPEN_M  =  9, 15
 MARKET_CLOSE_H, MARKET_CLOSE_M = 15, 30
 EOD_SCAN_H,     EOD_SCAN_M     = 15, 15   # 3:15 PM — scanner + baseline entries
@@ -110,8 +112,22 @@ def run_intraday_check():
     import paper_trader
     importlib.reload(paper_trader)
 
+    bot_status.write_status(
+        phase="intraday_check",
+        market_open=True,
+        last_error=None,
+        next_wake_at=(datetime.now() + timedelta(seconds=SCAN_INTERVAL_SEC)).strftime("%H:%M:%S"),
+    )
+    bot_status.log_activity("cycle", "SL/target check started")
     log("── SL/Target Check (baseline + confirm) ─────")
-    paper_trader.run(intraday_only=True)
+    try:
+        paper_trader.run(intraday_only=True)
+        bot_status.write_status(phase="idle", angel_ok=True)
+        bot_status.log_activity("cycle", "SL/target check complete")
+    except Exception as e:
+        bot_status.write_status(phase="error", last_error=str(e), last_error_at=datetime.now().isoformat())
+        bot_status.log_activity("error", f"Intraday check failed: {e}")
+        raise
     log("── Cycle complete ───────────────────────────")
 
 
@@ -125,10 +141,15 @@ def run_eod_scan():
     importlib.reload(paper_trader)
     importlib.reload(eod_confirm)
 
+    bot_status.write_status(phase="eod_scan", market_open=True)
+    bot_status.log_activity("eod", "EOD scan (3:15) started")
     log("── EOD Scan (3:15) — Scanner + Baseline ─────")
     long_buildup_scanner.scan()
     paper_trader.run()
     eod_confirm.save_shortlist()
+    today = datetime.now().strftime("%Y-%m-%d")
+    bot_status.write_status(eod_scan_done_today=today, phase="eod_scan_done")
+    bot_status.log_activity("eod", "EOD scan complete — shortlist saved")
     log("── EOD scan phase complete ──────────────────")
 
 
@@ -140,11 +161,16 @@ def run_eod_confirm(notify=False):
     importlib.reload(eod_confirm)
     importlib.reload(run_once)
 
+    bot_status.write_status(phase="eod_confirm", market_open=True)
+    bot_status.log_activity("eod", "EOD confirm (3:27) started")
     log("── EOD Confirm (3:27) — Intraday filters ───")
     eod_confirm.run_confirm()
     if notify:
         log("── Sending WhatsApp summary ─────────────────")
         run_once.send_whatsapp(run_once.build_summary())
+    today = datetime.now().strftime("%Y-%m-%d")
+    bot_status.write_status(eod_confirm_done_today=today, phase="idle")
+    bot_status.log_activity("eod", "EOD confirm complete")
     log("── EOD confirm phase complete ─────────────────")
 
 
@@ -167,6 +193,13 @@ def main():
     log(f"  Scan interval: every {SCAN_INTERVAL_SEC // 60} minutes (SL/target check)")
     log("  Press Ctrl+C to stop")
     log("=" * 60)
+
+    bot_status.write_status(
+        phase="starting",
+        market_open=is_market_open(),
+        started_at=datetime.now().isoformat(),
+    )
+    bot_status.log_activity("system", "Bot started")
 
     eod_scan_done_date = None
     eod_confirm_done_date = None
@@ -237,6 +270,12 @@ def main():
                 reason = "Market closed"
 
             log(f"  {reason} — next open in {h}h {m}m  (sleeping 10 min)")
+            bot_status.write_status(
+                phase="sleeping",
+                market_open=False,
+                sleep_reason=reason,
+                next_wake_at=(datetime.now() + timedelta(minutes=10)).strftime("%H:%M:%S"),
+            )
 
             if once:
                 log("  Market closed and --once flag set, exiting.")
