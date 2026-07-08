@@ -17,8 +17,8 @@ import json
 import os
 import time
 import pandas as pd
-import yfinance as yf
 from datetime import datetime
+from angel_api import AngelOneAPI as _AngelAPI
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment
 from openpyxl.utils import get_column_letter
@@ -52,9 +52,43 @@ SECTOR_MAP = {
     "BAJAJ-AUTO":"AUTO", "HEROMOTOCO":"AUTO", "ASHOKLEY":"AUTO", "EICHERMOT":"AUTO",
     "HYUNDAI":"AUTO", "UNOMINDA":"AUTO",
     "SHREECEM":"CEMENT", "ULTRACEMCO":"CEMENT", "DALBHARAT":"CEMENT", "AMBUJACEM":"CEMENT",
-    "TRENT":"RETAIL", "DMART":"RETAIL", "NYKAA":"RETAIL",
+    "TRENT":"RETAIL", "DMART":"RETAIL",
     "GODREJPROP":"REALTY", "LODHA":"REALTY", "DLF":"REALTY", "PRESTIGE":"REALTY",
     "OBEROIRLTY":"REALTY", "PHOENIXLTD":"REALTY",
+    # Pharma
+    "AUROPHARMA":"PHARMA", "CIPLA":"PHARMA", "SUNPHARMA":"PHARMA",
+    "DRREDDY":"PHARMA", "LUPIN":"PHARMA", "DIVISLAB":"PHARMA",
+    "ALKEM":"PHARMA", "TORNTPHARM":"PHARMA", "IPCALAB":"PHARMA",
+    # Hospitals
+    "MAXHEALTH":"HOSPITAL", "APOLLOHOSP":"HOSPITAL", "FORTIS":"HOSPITAL",
+    # Hotels
+    "INDHOTEL":"HOTEL", "LEMONTREE":"HOTEL", "CHALET":"HOTEL",
+    # Power & infra
+    "CGPOWER":"POWER", "NHPC":"POWER", "NTPC":"POWER", "POWERGRID":"POWER",
+    "SIEMENS":"CAPITAL_GOODS", "ABB":"CAPITAL_GOODS", "BHEL":"CAPITAL_GOODS",
+    # E-commerce / consumer
+    "NYKAA":"ECOMM", "FIRSTCRY":"ECOMM", "ZOMATO":"ECOMM",
+    # Auto ancillaries
+    "SONACOMS":"AUTO_ANC", "BOSCHLTD":"AUTO_ANC", "BHARATFORG":"AUTO_ANC",
+    "SUNDRMFAST":"AUTO_ANC",
+    # Chemicals
+    "PIDILITIND":"CHEMICALS", "AARTI":"CHEMICALS", "DEEPAKNTR":"CHEMICALS",
+    # Telecom
+    "BHARTIARTL":"TELECOM", "IDEA":"TELECOM",
+    # FMCG
+    "HINDUNILVR":"FMCG", "ITC":"FMCG", "NESTLEIND":"FMCG", "BRITANNIA":"FMCG",
+    "DABUR":"FMCG", "MARICO":"FMCG", "COLPAL":"FMCG",
+    # Insurance
+    "HDFCLIFE":"INSURANCE", "SBILIFE":"INSURANCE", "ICICIPRULI":"INSURANCE",
+    "LICI":"INSURANCE",
+    # Oil & gas
+    "RELIANCE":"OIL_GAS", "ONGC":"OIL_GAS", "BPCL":"OIL_GAS", "IOC":"OIL_GAS",
+    "GAIL":"OIL_GAS",
+    # Metals
+    "TATASTEEL":"METALS", "HINDALCO":"METALS", "JSWSTEEL":"METALS",
+    "SAIL":"METALS", "VEDL":"METALS", "NATIONALUM":"METALS",
+    # Diversified
+    "UNITDSPR":"DIVERSIFIED",
 }
 
 
@@ -87,24 +121,17 @@ def save_portfolio(portfolio, path=PORTFOLIO_FILE):
 
 
 # ── Price fetch (batched) ─────────────────────────────────────────────────────
+_angel = _AngelAPI()
+
 def fetch_prices(symbols):
+    """Fetch live LTP for a list of NSE symbols via Angel One SmartAPI."""
     if not symbols:
         return {}
-    tickers = [f"{s}.NS" for s in symbols]
     try:
-        df = yf.download(tickers, period="1d", interval="1d",
-                         group_by="ticker", auto_adjust=True, progress=False)
-        prices = {}
-        for sym in symbols:
-            try:
-                col  = df[f"{sym}.NS"]["Close"] if len(symbols) > 1 else df["Close"]
-                vals = col.dropna().values
-                prices[sym] = round(float(vals[-1]), 2) if len(vals) else None
-            except Exception:
-                prices[sym] = None
-        return prices
+        quotes = _angel.get_quotes(symbols)
+        return {sym: round(q["ltp"], 2) for sym, q in quotes.items() if q.get("ltp")}
     except Exception as e:
-        log(f"  !! Price fetch failed: {e}")
+        log(f"  !! Angel One price fetch failed: {e}")
         return {s: None for s in symbols}
 
 
@@ -156,14 +183,26 @@ def _fmt_entry_val(val):
 
 
 def _entry_storage(record):
-    """Persist scanner entry snapshot on positions and closed_trades."""
+    """Persist full scanner signal snapshot on positions and closed_trades."""
     return {
+        # Signal quality fields
         "price_chg":   record.get("price_chg"),
         "oi_chg":      record.get("oi_chg"),
         "vol_ratio":   record.get("vol_ratio"),
         "pcr":         record.get("pcr"),
         "sector":      record.get("sector") or "-",
         "macro_entry": record.get("macro_entry", "UNKNOWN"),
+        # EMA stack values at entry (for trend-strength analysis)
+        "ema9":        record.get("ema9"),
+        "ema21":       record.get("ema21"),
+        "ema50":       record.get("ema50"),
+        # Raw OI numbers (for absolute OI context, not just % change)
+        "latest_oi":   record.get("latest_oi"),
+        "prev_oi":     record.get("prev_oi"),
+        # Entry time (so we can later analyse 3:15 vs 3:27 entries)
+        "entry_time":  record.get("entry_time") or datetime.now().strftime("%H:%M:%S"),
+        # NSE scan timestamp (tells us lag between scan data and entry)
+        "nse_ts":      record.get("nse_ts"),
     }
 
 
@@ -182,6 +221,12 @@ def _entry_excel_cols(record):
             "PCR":         "-",
             "Sector":      "-",
             "Macro":       macro,
+            "EMA9":        "-",
+            "EMA21":       "-",
+            "EMA50":       "-",
+            "Latest OI":   "-",
+            "Entry Time":  "-",
+            "NSE TS":      "-",
         }
     return {
         "Price Chg %": _fmt_entry_val(record.get("price_chg")),
@@ -190,12 +235,19 @@ def _entry_excel_cols(record):
         "PCR":         _fmt_entry_val(record.get("pcr")),
         "Sector":      record.get("sector") or "-",
         "Macro":       macro,
+        "EMA9":        _fmt_entry_val(record.get("ema9")),
+        "EMA21":       _fmt_entry_val(record.get("ema21")),
+        "EMA50":       _fmt_entry_val(record.get("ema50")),
+        "Latest OI":   _fmt_entry_val(record.get("latest_oi")),
+        "Entry Time":  record.get("entry_time", "-"),
+        "NSE TS":      record.get("nse_ts", "-"),
     }
 
 
 ALL_TRADES_COLUMNS = [
     "Symbol", "Entry Date", "Exit Date", "Entry ₹", "Exit ₹", "Qty",
     "Price Chg %", "OI Chg %", "Vol Ratio", "PCR", "Sector", "Macro",
+    "EMA9", "EMA21", "EMA50", "Latest OI", "Entry Time", "NSE TS",
     "P&L ₹", "P&L %", "Status", "Exit Reason",
 ]
 
@@ -497,6 +549,11 @@ def _process_exits(portfolio, curr_prices, today, label=""):
 
     for sym, exit_px, pnl_abs, pnl_pct, reason in to_close:
         pos = portfolio["positions"].pop(sym)
+        entry_dt = pos.get("entry_date", today)
+        try:
+            hold_days = (datetime.strptime(today, "%Y-%m-%d") - datetime.strptime(entry_dt, "%Y-%m-%d")).days
+        except Exception:
+            hold_days = None
         portfolio["cash"] += round(exit_px * pos["quantity"], 2)
         portfolio["closed_trades"].append({
             "symbol": sym,
@@ -508,6 +565,7 @@ def _process_exits(portfolio, curr_prices, today, label=""):
             "pnl_abs": pnl_abs,
             "pnl_pct": pnl_pct,
             "reason": reason,
+            "hold_days": hold_days,
             **_entry_storage(pos),
         })
         sign = "+" if pnl_abs >= 0 else ""
@@ -519,8 +577,13 @@ def _process_exits(portfolio, curr_prices, today, label=""):
 def _open_positions(portfolio, signals, macro, fii_net, today, label=""):
     """Open new positions from scanner signals. Returns set of symbols entered."""
     already_open = set(portfolio["positions"].keys())
-    traded_today = {t["symbol"] for t in portfolio["closed_trades"] if t["exit_date"] == today}
-    new_signals = [r for r in signals if r["symbol"] not in already_open and r["symbol"] not in traded_today]
+    from datetime import timedelta as _td
+    _cutoff = (datetime.now() - _td(days=3)).strftime("%Y-%m-%d")
+    recently_traded = {
+        t["symbol"] for t in portfolio["closed_trades"]
+        if t.get("exit_date", "") >= _cutoff
+    }
+    new_signals = [r for r in signals if r["symbol"] not in already_open and r["symbol"] not in recently_traded]
     slots_free = MAX_POSITIONS - len(portfolio["positions"])
 
     log(f"\n  {label}Signals: {len(signals)}  |  New: {len(new_signals)}  |  Slots: {slots_free}  |  Cash: ₹{portfolio['cash']:,.0f}")
@@ -577,12 +640,19 @@ def _open_positions(portfolio, signals, macro, fii_net, today, label=""):
             "stop_loss": sl_px,
             "target": tgt_px,
             **_entry_storage({
-                "price_chg": sig.get("price_chg"),
-                "oi_chg": sig.get("oi_chg"),
-                "vol_ratio": sig.get("vol_ratio"),
-                "pcr": sig.get("pcr"),
-                "sector": sec or "-",
+                "price_chg":   sig.get("price_chg"),
+                "oi_chg":      sig.get("oi_chg"),
+                "vol_ratio":   sig.get("vol_ratio"),
+                "pcr":         sig.get("pcr"),
+                "sector":      sec or "-",
                 "macro_entry": macro,
+                # pass through EMA and OI fields from scanner signal
+                "ema9":        sig.get("ema9"),
+                "ema21":       sig.get("ema21"),
+                "ema50":       sig.get("ema50"),
+                "latest_oi":   sig.get("latest_oi"),
+                "prev_oi":     sig.get("prev_oi"),
+                "nse_ts":      sig.get("nse_ts"),
             }),
         }
         if sec:
@@ -645,11 +715,15 @@ def run(intraday_only=False):
     if macro == "CAUTIOUS":
         log("  **  MACRO CAUTIOUS — FII net selling. Entering with reduced conviction. **")
 
-    skipped_today = [r["symbol"] for r in signals if r["symbol"] in {
-        t["symbol"] for t in portfolio["closed_trades"] if t["exit_date"] == today
-    }]
-    if skipped_today:
-        log(f"  Skipped (already traded today): {', '.join(skipped_today)}")
+    from datetime import timedelta as _td
+    _cutoff = (datetime.now() - _td(days=3)).strftime("%Y-%m-%d")
+    recently_traded = {
+        t["symbol"] for t in portfolio["closed_trades"]
+        if t.get("exit_date", "") >= _cutoff
+    }
+    skipped_recent = [r["symbol"] for r in signals if r["symbol"] in recently_traded]
+    if skipped_recent:
+        log(f"  Skipped (traded within 3 days): {', '.join(skipped_recent)}")
 
     log("\n  ── Baseline Entries (3:15) ──")
     _open_positions(portfolio, signals, macro, fii_net, today)
@@ -659,7 +733,7 @@ def run(intraday_only=False):
     all_prices = {**curr_prices, **all_prices}
 
     unrealised  = sum(
-        (all_prices.get(s, p["entry_price"]) - p["entry_price"]) * p["quantity"]
+        ((all_prices.get(s) or p["entry_price"]) - p["entry_price"]) * p["quantity"]
         for s, p in portfolio["positions"].items()
     )
     invested_val = sum(p["invested"] for p in portfolio["positions"].values())

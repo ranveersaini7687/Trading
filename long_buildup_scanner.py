@@ -218,7 +218,22 @@ def get_fii_dii_data(session, trade_date):
     # returns the previous day's final figures, which would skew the macro signal.
     now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
     if now_ist.hour < 16 or (now_ist.hour == 16 and now_ist.minute < 30):
-        log(f"  → Skipping — NSE data not yet released (IST {now_ist.strftime('%H:%M')}, wait until 16:30)")
+        log(f"  → NSE FII data not yet released (IST {now_ist.strftime('%H:%M')}) — loading most recent cached data")
+        # Walk back up to 5 days to find the latest cached file
+        for days_back in range(1, 6):
+            past_date = (datetime.now() - timedelta(days=days_back)).strftime("%Y%m%d")
+            past_cache = os.path.join(CACHE_DIR, f"fii_dii_{past_date}.json")
+            if os.path.exists(past_cache):
+                with open(past_cache) as _f:
+                    _data = json.load(_f)
+                if "data" in _data and "ts" in _data:   # handle old nested format
+                    _data = _data["data"]
+                fii_net = _data.get("fii_net", 0)
+                dii_net = _data.get("dii_net", 0)
+                if fii_net != 0 or dii_net != 0:
+                    log(f"  → Using cached FII data from {past_date}: FII ₹{fii_net:+,.0f} Cr  DII ₹{dii_net:+,.0f} Cr")
+                    return _data
+        log("  → No cached FII data found — macro defaults to NEUTRAL")
         return {}
 
     os.makedirs(CACHE_DIR, exist_ok=True)
