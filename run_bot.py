@@ -4,7 +4,7 @@ Bot Runner — Auto-schedules scanner + paper trader during NSE market hours.
 
 Market hours    : 9:15 AM – 3:30 PM IST, Monday–Friday
 Scan interval   : every 5 minutes during market hours
-EOD baseline    : 3:15 PM — scanner + baseline entries
+EOD baseline    : 3:25 PM — scanner + baseline entries
 EOD confirm     : 3:27 PM — intraday filter + shadow confirm entries
 
 Usage:
@@ -22,7 +22,7 @@ import bot_status
 
 MARKET_OPEN_H,  MARKET_OPEN_M  =  9, 15
 MARKET_CLOSE_H, MARKET_CLOSE_M = 15, 30
-EOD_SCAN_H,     EOD_SCAN_M     = 15, 15   # 3:15 PM — scanner + baseline entries
+EOD_SCAN_H,     EOD_SCAN_M     = 15, 25   # 3:25 PM — scanner + baseline entries
 EOD_CONFIRM_H,  EOD_CONFIRM_M  = 15, 27   # 3:27 PM — intraday confirm + shadow book
 SCAN_INTERVAL_SEC = 300   # 5 minutes
 
@@ -47,14 +47,14 @@ def is_market_open():
 
 
 def is_eod_scan_time():
-    """True from 3:15 PM until 3:27 PM (baseline scan window)."""
+    """True from 3:25 PM until market close (baseline scan window)."""
     now = datetime.now()
     if now.weekday() >= 5:
         return False
     t = _minutes_now()
     scan_t = EOD_SCAN_H * 60 + EOD_SCAN_M
-    confirm_t = EOD_CONFIRM_H * 60 + EOD_CONFIRM_M
-    return scan_t <= t < confirm_t
+    close_t = MARKET_CLOSE_H * 60 + MARKET_CLOSE_M
+    return scan_t <= t <= close_t
 
 
 def is_eod_confirm_time():
@@ -132,7 +132,7 @@ def run_intraday_check():
 
 
 def run_eod_scan():
-    """3:15 PM: scanner + baseline entries + save shortlist."""
+    """3:25 PM: scanner + baseline entries + save shortlist."""
     import importlib
     import long_buildup_scanner
     import paper_trader
@@ -142,8 +142,8 @@ def run_eod_scan():
     importlib.reload(eod_confirm)
 
     bot_status.write_status(phase="eod_scan", market_open=True)
-    bot_status.log_activity("eod", "EOD scan (3:15) started")
-    log("── EOD Scan (3:15) — Scanner + Baseline ─────")
+    bot_status.log_activity("eod", "EOD scan (3:25) started")
+    log("── EOD Scan (3:25) — Scanner + Baseline ─────")
     long_buildup_scanner.scan()
     paper_trader.run()
     eod_confirm.save_shortlist()
@@ -175,7 +175,7 @@ def run_eod_confirm(notify=False):
 
 
 def run_eod_full_cycle(notify=False):
-    """3:15 scan → wait until 3:27 → confirm (avoids missing confirm window)."""
+    """3:25 scan → wait until 3:27 → confirm (avoids missing confirm window)."""
     run_eod_scan()
     wait_until_confirm()
     run_eod_confirm(notify=notify)

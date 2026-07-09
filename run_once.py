@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Single-cycle runner — called by GitHub Actions daily at 3:15 PM IST.
+Single-cycle runner — called by GitHub Actions daily at 3:25 PM IST.
 Also used for manual one-shot runs: python3 run_once.py
 """
 import os

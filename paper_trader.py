@@ -737,7 +737,7 @@ def run(intraday_only=False):
     if skipped_recent:
         log(f"  Skipped (traded within 3 days): {', '.join(skipped_recent)}")
 
-    log("\n  ── Baseline Entries (3:15) ──")
+    log("\n  ── Baseline Entries (3:25) ──")
     _open_positions(portfolio, signals, macro, fii_net, today)
 
     all_syms = list(set(portfolio["positions"]) | set(confirm_pf["positions"]))

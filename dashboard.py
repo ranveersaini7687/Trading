@@ -231,7 +231,7 @@ def _timeline_html(today):
     confirm_ok = len(confirm_entries) > 0 or status.get("eod_confirm_done_today") == today
 
     steps = [
-        ("3:15 Scanner", scan_ok, f"{scan.get('summary', {}).get('matched', 0)} matched" if scan_ok else "pending"),
+        ("3:25 Scanner", scan_ok, f"{scan.get('summary', {}).get('matched', 0)} matched" if scan_ok else "pending"),
         ("Shortlist saved", shortlist_ok, f"{len(shortlist.get('signals', []))} signals" if shortlist_ok else "pending"),
         ("3:27 Confirm", confirm_ok, f"{sum(1 for e in confirm_entries if e.get('confirm_pass'))} passed" if confirm_entries else ("done" if confirm_ok else "pending")),
         ("Excel export", bot_status.file_age_minutes("trade_log.xlsx") is not None and bot_status.file_age_minutes("trade_log.xlsx") < 1440,
@@ -404,7 +404,7 @@ def main():
                 st.plotly_chart(_funnel_chart(summary), use_container_width=True)
                 st.caption(f"last scan: {scan.get('scan_time', '—')[:19].replace('T', ' ')}")
             else:
-                st.info("no scan data — waiting for 3:15 PM run")
+                st.info("no scan data — waiting for 3:25 PM run")
 
             st.markdown("#### file freshness")
             files = [
@@ -509,7 +509,7 @@ def main():
             c_pnl = sum(t.get("pnl_abs", 0) for t in confirm_pf.get("closed_trades", []))
 
             cmp_df = pd.DataFrame([
-                {"Book": "Baseline (3:15)", "Open": b_open, "Closed": b_closed, "Realised P&L": b_pnl},
+                {"Book": "Baseline (3:25)", "Open": b_open, "Closed": b_closed, "Realised P&L": b_pnl},
                 {"Book": "Confirm (3:27)", "Open": c_open, "Closed": c_closed, "Realised P&L": c_pnl},
             ])
             st.dataframe(

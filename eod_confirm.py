@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-EOD Confirm — Stage-2 intraday filter (3:27 PM) on top of the 3:15 scanner shortlist.
+EOD Confirm — Stage-2 intraday filter (3:27 PM) on top of the 3:25 scanner shortlist.
 
-Stage 1 (3:15): existing scanner filters → saved to eod_shortlist.json
+Stage 1 (3:25): existing scanner filters → saved to eod_shortlist.json
 Stage 2 (3:27): vol >= 1.5x AND (close > open OR near day high OR new high)
 
 Logs every candidate to eod_confirm_log.json.
@@ -32,7 +32,7 @@ def log(msg):
 
 
 def save_shortlist():
-    """Persist today's scanner shortlist after the 3:15 scan."""
+    """Persist today's scanner shortlist after the 3:25 scan."""
     if not os.path.exists(SCAN_FILE):
         log(f"  !! {SCAN_FILE} missing — cannot save shortlist")
         return False
@@ -133,7 +133,7 @@ def run_confirm():
     now_s = datetime.now().strftime("%H:%M:%S")
 
     if not os.path.exists(SHORTLIST_FILE):
-        log(f"  !! {SHORTLIST_FILE} missing — run 3:15 scan first")
+        log(f"  !! {SHORTLIST_FILE} missing — run 3:25 scan first")
         return []
 
     with open(SHORTLIST_FILE) as f:
