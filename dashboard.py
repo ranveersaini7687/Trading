@@ -233,7 +233,7 @@ def _timeline_html(today):
     steps = [
         ("3:25 Scanner", scan_ok, f"{scan.get('summary', {}).get('matched', 0)} matched" if scan_ok else "pending"),
         ("Shortlist saved", shortlist_ok, f"{len(shortlist.get('signals', []))} signals" if shortlist_ok else "pending"),
-        ("3:27 Confirm", confirm_ok, f"{sum(1 for e in confirm_entries if e.get('confirm_pass'))} passed" if confirm_entries else ("done" if confirm_ok else "pending")),
+        ("3:30 Confirm", confirm_ok, f"{sum(1 for e in confirm_entries if e.get('confirm_pass'))} passed" if confirm_entries else ("done" if confirm_ok else "pending")),
         ("Excel export", bot_status.file_age_minutes("trade_log.xlsx") is not None and bot_status.file_age_minutes("trade_log.xlsx") < 1440,
          f"{bot_status.file_age_minutes('trade_log.xlsx') or '—'}m ago"),
     ]
@@ -510,7 +510,7 @@ def main():
 
             cmp_df = pd.DataFrame([
                 {"Book": "Baseline (3:25)", "Open": b_open, "Closed": b_closed, "Realised P&L": b_pnl},
-                {"Book": "Confirm (3:27)", "Open": c_open, "Closed": c_closed, "Realised P&L": c_pnl},
+                {"Book": "Confirm (3:30)", "Open": c_open, "Closed": c_closed, "Realised P&L": c_pnl},
             ])
             st.dataframe(
                 cmp_df.style.format({"Realised P&L": "₹{:+,.0f}"}),
@@ -542,7 +542,7 @@ def main():
                 st.dataframe(pd.DataFrame(entries).tail(10), hide_index=True, use_container_width=True)
                 st.caption("no confirm entries for today")
             else:
-                st.caption("confirm log empty — runs at 3:27 PM")
+                st.caption("confirm log empty — runs at 3:30 PM")
 
             if summary:
                 st.markdown("#### entry signal snapshot")

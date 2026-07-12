@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-EOD Confirm — Stage-2 intraday filter (3:27 PM) on top of the 3:25 scanner shortlist.
+EOD Confirm — Stage-2 intraday filter (3:30 PM) on top of the 3:25 scanner shortlist.
 
 Stage 1 (3:25): existing scanner filters → saved to eod_shortlist.json
-Stage 2 (3:27): vol >= 1.5x AND (close > open OR near day high OR new high)
+Stage 2 (3:30): vol >= 1.5x AND (close > open OR near day high OR new high)
 
 Logs every candidate to eod_confirm_log.json.
 Confirm-passing signals open positions in paper_portfolio_confirm.json (shadow book).
@@ -128,7 +128,7 @@ def evaluate_intraday(quote, avg_vol, scan_vol_ratio=None):
 
 
 def run_confirm():
-    """Run Stage-2 confirm at 3:27 PM."""
+    """Run Stage-2 confirm at 3:30 PM."""
     today = datetime.now().strftime("%Y-%m-%d")
     now_s = datetime.now().strftime("%H:%M:%S")
 

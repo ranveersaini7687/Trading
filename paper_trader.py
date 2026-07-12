@@ -678,10 +678,10 @@ def _open_positions(portfolio, signals, macro, fii_net, today, label=""):
 
 
 def enter_confirm_positions(signals, macro, fii_net):
-    """Open shadow positions for EOD Confirm strategy (called at 3:27)."""
+    """Open shadow positions for EOD Confirm strategy (called at 3:30)."""
     portfolio = load_portfolio(CONFIRM_PORTFOLIO_FILE)
     today = datetime.now().strftime("%Y-%m-%d")
-    log("\n  ── Confirm Strategy Entries (3:27) ──")
+    log("\n  ── Confirm Strategy Entries (3:30) ──")
     entered = _open_positions(portfolio, signals, macro, fii_net, today, label="[confirm] ")
     save_portfolio(portfolio, CONFIRM_PORTFOLIO_FILE)
     return entered

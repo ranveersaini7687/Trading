@@ -4,8 +4,8 @@ Bot Runner — Auto-schedules scanner + paper trader during NSE market hours.
 
 Market hours    : 9:15 AM – 3:30 PM IST, Monday–Friday
 Scan interval   : every 5 minutes during market hours
-EOD baseline    : 3:25 PM — scanner + baseline entries
-EOD confirm     : 3:27 PM — intraday filter + shadow confirm entries
+EOD baseline    : 3:25 PM — scanner + baseline entries (wall-clock wake)
+EOD confirm     : 3:30 PM — intraday filter + shadow confirm entries
 
 Usage:
   python3 run_bot.py          # runs forever, Ctrl+C to stop
@@ -23,8 +23,9 @@ import bot_status
 MARKET_OPEN_H,  MARKET_OPEN_M  =  9, 15
 MARKET_CLOSE_H, MARKET_CLOSE_M = 15, 30
 EOD_SCAN_H,     EOD_SCAN_M     = 15, 25   # 3:25 PM — scanner + baseline entries
-EOD_CONFIRM_H,  EOD_CONFIRM_M  = 15, 27   # 3:27 PM — intraday confirm + shadow book
-SCAN_INTERVAL_SEC = 300   # 5 minutes
+EOD_CONFIRM_H,  EOD_CONFIRM_M  = 15, 30   # 3:30 PM — intraday confirm + shadow book
+SCAN_INTERVAL_SEC = 300        # 5 minutes (intraday SL/target)
+PRE_EOD_LOOKAHEAD_SEC = 300    # skip intraday checks within 5 min of EOD scan
 
 
 def log(msg):
@@ -46,24 +47,65 @@ def is_market_open():
     return open_t <= t <= close_t
 
 
+def _today_at(h, m):
+    now = datetime.now()
+    return now.replace(hour=h, minute=m, second=0, microsecond=0)
+
+
 def is_eod_scan_time():
-    """True from 3:25 PM until market close (baseline scan window)."""
+    """True from 3:25:00 PM until market close (baseline scan window)."""
     now = datetime.now()
     if now.weekday() >= 5:
         return False
-    t = _minutes_now()
-    scan_t = EOD_SCAN_H * 60 + EOD_SCAN_M
-    close_t = MARKET_CLOSE_H * 60 + MARKET_CLOSE_M
-    return scan_t <= t <= close_t
+    scan_at = _today_at(EOD_SCAN_H, EOD_SCAN_M)
+    close_at = _today_at(MARKET_CLOSE_H, MARKET_CLOSE_M)
+    return scan_at <= now <= close_at
 
 
 def is_eod_confirm_time():
-    """True from 3:27 PM until market close."""
+    """True from 3:30:00 PM until market close."""
     now = datetime.now()
     if now.weekday() >= 5:
         return False
-    t = _minutes_now()
-    return t >= EOD_CONFIRM_H * 60 + EOD_CONFIRM_M
+    return now >= _today_at(EOD_CONFIRM_H, EOD_CONFIRM_M)
+
+
+def seconds_until_eod_scan():
+    """Seconds until today's 3:25:00 PM (0 if already past)."""
+    now = datetime.now()
+    target = _today_at(EOD_SCAN_H, EOD_SCAN_M)
+    return max(0, int((target - now).total_seconds()))
+
+
+def approaching_eod_scan(eod_scan_done_date):
+    """True when within PRE_EOD_LOOKAHEAD_SEC of 3:25 and scan not yet run today."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    if eod_scan_done_date == today:
+        return False
+    if datetime.now().weekday() >= 5:
+        return False
+    secs = seconds_until_eod_scan()
+    return 0 < secs <= PRE_EOD_LOOKAHEAD_SEC
+
+
+def next_5min_boundary():
+    """Seconds until the next clock-aligned 5-min tick (e.g. :15, :20, :25)."""
+    now = datetime.now()
+    minute = (now.minute // 5 + 1) * 5
+    if minute >= 60:
+        nxt = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+    else:
+        nxt = now.replace(minute=minute, second=0, microsecond=0)
+    return max(1, int((nxt - now).total_seconds()))
+
+
+def compute_sleep_seconds(eod_scan_done_date):
+    """Sleep until EOD scan time when close; otherwise align to 5-min clock."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    secs_to_scan = seconds_until_eod_scan()
+    if eod_scan_done_date != today and 0 < secs_to_scan <= SCAN_INTERVAL_SEC:
+        return secs_to_scan
+    return min(next_5min_boundary(), SCAN_INTERVAL_SEC)
 
 
 def seconds_until_open():
@@ -77,9 +119,9 @@ def seconds_until_open():
 
 
 def wait_until_confirm():
-    """Block until 3:27 PM so confirm is not skipped by the 5-min poll gap."""
+    """Block until 3:30 PM so confirm runs after scan finishes."""
     now = datetime.now()
-    target = now.replace(hour=EOD_CONFIRM_H, minute=EOD_CONFIRM_M, second=0, microsecond=0)
+    target = _today_at(EOD_CONFIRM_H, EOD_CONFIRM_M)
     if now >= target:
         return
     secs = int((target - now).total_seconds())
@@ -154,7 +196,7 @@ def run_eod_scan():
 
 
 def run_eod_confirm(notify=False):
-    """3:27 PM: intraday confirm filters + shadow entries + Excel + WhatsApp."""
+    """3:30 PM: intraday confirm filters + shadow entries + Excel + WhatsApp."""
     import importlib
     import eod_confirm
     import run_once
@@ -162,8 +204,8 @@ def run_eod_confirm(notify=False):
     importlib.reload(run_once)
 
     bot_status.write_status(phase="eod_confirm", market_open=True)
-    bot_status.log_activity("eod", "EOD confirm (3:27) started")
-    log("── EOD Confirm (3:27) — Intraday filters ───")
+    bot_status.log_activity("eod", "EOD confirm (3:30) started")
+    log("── EOD Confirm (3:30) — Intraday filters ───")
     eod_confirm.run_confirm()
     if notify:
         log("── Sending WhatsApp summary ─────────────────")
@@ -175,7 +217,7 @@ def run_eod_confirm(notify=False):
 
 
 def run_eod_full_cycle(notify=False):
-    """3:25 scan → wait until 3:27 → confirm (avoids missing confirm window)."""
+    """3:25 scan → wait until 3:30 → confirm."""
     run_eod_scan()
     wait_until_confirm()
     run_eod_confirm(notify=notify)
@@ -240,6 +282,19 @@ def main():
                 except Exception:
                     log("  !! EOD confirm failed:")
                     traceback.print_exc()
+            elif approaching_eod_scan(eod_scan_done_date):
+                secs = seconds_until_eod_scan()
+                wake_at = _today_at(EOD_SCAN_H, EOD_SCAN_M).strftime("%H:%M:%S")
+                log(f"  Pre-EOD — skipping intraday check, sleeping until "
+                    f"{EOD_SCAN_H:02d}:{EOD_SCAN_M:02d} ({secs}s)...")
+                bot_status.write_status(
+                    phase="pre_eod",
+                    market_open=True,
+                    next_wake_at=wake_at,
+                )
+                time.sleep(secs)
+                continue
+
             else:
                 try:
                     run_intraday_check()
@@ -253,9 +308,11 @@ def main():
                 log("  --once flag set, exiting after one cycle.")
                 break
 
-            log(f"  Next check in {SCAN_INTERVAL_SEC // 60} min "
-                f"(~{(datetime.now() + timedelta(seconds=SCAN_INTERVAL_SEC)).strftime('%H:%M')})")
-            time.sleep(SCAN_INTERVAL_SEC)
+            sleep_secs = compute_sleep_seconds(eod_scan_done_date)
+            wake_at = (datetime.now() + timedelta(seconds=sleep_secs)).strftime("%H:%M:%S")
+            log(f"  Next check in {sleep_secs // 60}m {sleep_secs % 60}s (~{wake_at})")
+            bot_status.write_status(next_wake_at=wake_at)
+            time.sleep(sleep_secs)
 
         else:
             now  = datetime.now()
