@@ -18,7 +18,7 @@ import os
 import time
 import pandas as pd
 from datetime import datetime
-from angel_api import AngelOneAPI as _AngelAPI
+from angel_api import fetch_ltps
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment
 from openpyxl.utils import get_column_letter
@@ -120,19 +120,26 @@ def save_portfolio(portfolio, path=PORTFOLIO_FILE):
         json.dump(portfolio, f, indent=2)
 
 
-# ── Price fetch (batched) ─────────────────────────────────────────────────────
-_angel = _AngelAPI()
-
+# ── Price fetch (batched, shared Angel session) ─────────────────────────────────
 def fetch_prices(symbols):
-    """Fetch live LTP for a list of NSE symbols via Angel One SmartAPI."""
+    """Fetch live LTP for NSE symbols."""
     if not symbols:
         return {}
     try:
-        quotes = _angel.get_quotes(symbols)
-        return {sym: round(q["ltp"], 2) for sym, q in quotes.items() if q.get("ltp")}
+        prices = fetch_ltps(symbols)
+        return {sym: prices.get(sym) for sym in symbols}
     except Exception as e:
         log(f"  !! Angel One price fetch failed: {e}")
         return {s: None for s in symbols}
+
+
+def _merge_prices(base, extra_symbols):
+    """Fill missing symbols with one batched quote call."""
+    merged = dict(base or {})
+    missing = [s for s in extra_symbols if merged.get(s) is None]
+    if missing:
+        merged.update(fetch_prices(missing))
+    return merged
 
 
 # ── Scanner results ───────────────────────────────────────────────────────────
@@ -245,7 +252,7 @@ def _entry_excel_cols(record):
 
 
 ALL_TRADES_COLUMNS = [
-    "Symbol", "Entry Date", "Exit Date", "Entry ₹", "Exit ₹", "Qty",
+    "Symbol", "Entry Date", "Exit Date", "Entry ₹", "Exit ₹", "CMP ₹", "Qty",
     "Price Chg %", "OI Chg %", "Vol Ratio", "PCR", "Sector", "Macro",
     "EMA9", "EMA21", "EMA50", "Latest OI", "Entry Time", "NSE TS",
     "P&L ₹", "P&L %", "Status", "Exit Reason",
@@ -283,7 +290,7 @@ def _trades_rows(portfolio, all_prices):
         closed_rows.append({
             "Symbol": t["symbol"], "Entry Date": t["entry_date"],
             "Exit Date": t["exit_date"], "Entry ₹": t["entry_price"],
-            "Exit ₹": t["exit_price"], "Qty": t["quantity"],
+            "Exit ₹": t["exit_price"], "CMP ₹": "-", "Qty": t["quantity"],
             **_entry_excel_cols(t),
             "P&L ₹": t["pnl_abs"], "P&L %": t["pnl_pct"],
             "Status": "CLOSED", "Exit Reason": t["reason"],
@@ -295,7 +302,7 @@ def _trades_rows(portfolio, all_prices):
         open_rows.append({
             "Symbol": sym, "Entry Date": pos["entry_date"],
             "Exit Date": "-", "Entry ₹": pos["entry_price"],
-            "Exit ₹": curr, "Qty": pos["quantity"],
+            "Exit ₹": "-", "CMP ₹": curr, "Qty": pos["quantity"],
             **_entry_excel_cols(pos),
             "P&L ₹": pnl, "P&L %": pnl_pct,
             "Status": "OPEN", "Exit Reason": "-",
@@ -426,15 +433,17 @@ def _open_positions_rows(portfolio, all_prices):
     return open_df
 
 
-def generate_excel(portfolio, all_prices, confirm_portfolio=None):
+def generate_excel(portfolio, all_prices=None, confirm_portfolio=None):
     trades = portfolio.get("closed_trades", [])
     if confirm_portfolio is None:
         confirm_portfolio = load_portfolio(CONFIRM_PORTFOLIO_FILE)
     confirm_trades = confirm_portfolio.get("closed_trades", [])
 
-    confirm_syms = list(confirm_portfolio.get("positions", {}).keys())
-    confirm_prices = fetch_prices(confirm_syms) if confirm_syms else {}
-    all_confirm_prices = {**all_prices, **confirm_prices}
+    syms = list(set(portfolio.get("positions", {})) | set(confirm_portfolio.get("positions", {})))
+    if all_prices is None:
+        all_prices = fetch_prices(syms) if syms else {}
+    else:
+        all_prices = _merge_prices(all_prices, syms)
 
     with pd.ExcelWriter(EXCEL_FILE, engine="openpyxl") as writer:
 
@@ -446,8 +455,8 @@ def generate_excel(portfolio, all_prices, confirm_portfolio=None):
             df = df.sort_values("_sort", ascending=False).drop(columns="_sort").reset_index(drop=True)
         df.to_excel(writer, sheet_name="All Trades", index=False)
 
-        # ── Sheet 2: Confirm Trades (3:27 shadow strategy) ───────────────────
-        confirm_rows = _trades_rows(confirm_portfolio, all_confirm_prices)
+        # ── Sheet 2: Confirm Trades (shadow strategy) ────────────────────────
+        confirm_rows = _trades_rows(confirm_portfolio, all_prices)
         cdf = pd.DataFrame(confirm_rows, columns=ALL_TRADES_COLUMNS)
         if not cdf.empty:
             cdf["_sort"] = pd.to_datetime(cdf["Entry Date"], errors="coerce")
@@ -467,7 +476,7 @@ def generate_excel(portfolio, all_prices, confirm_portfolio=None):
         open_df.to_excel(writer, sheet_name="Open Positions", index=False)
 
         # ── Sheet 5: Confirm Open Positions ───────────────────────────────────
-        confirm_open_df = _open_positions_rows(confirm_portfolio, all_confirm_prices)
+        confirm_open_df = _open_positions_rows(confirm_portfolio, all_prices)
         confirm_open_df.to_excel(writer, sheet_name="Confirm Open Positions", index=False)
 
         # ── Sheet 6–8: Baseline P&L ───────────────────────────────────────────
@@ -580,7 +589,7 @@ def _process_exits(portfolio, curr_prices, today, label=""):
     return portfolio, len(to_close)
 
 
-def _open_positions(portfolio, signals, macro, fii_net, today, label=""):
+def _open_positions(portfolio, signals, macro, fii_net, today, label="", entry_prices=None):
     """Open new positions from scanner signals. Returns set of symbols entered."""
     already_open = set(portfolio["positions"].keys())
     from datetime import timedelta as _td
@@ -608,15 +617,23 @@ def _open_positions(portfolio, signals, macro, fii_net, today, label=""):
         if sec:
             sector_count[sec] = sector_count.get(sec, 0) + 1
 
+    if entry_prices is None and new_signals:
+        entry_prices = fetch_prices([r["symbol"] for r in new_signals])
+    entry_prices = entry_prices or {}
+
     entered = set()
     count = 0
     for sig in new_signals:
         if count >= slots_free:
             break
         sym = sig["symbol"]
-        entry_px = sig["spot_price"]
-        if entry_px <= 0:
+        scan_px = sig.get("spot_price") or 0
+        entry_px = entry_prices.get(sym) or scan_px
+        if not entry_px or entry_px <= 0:
             continue
+        entry_px = round(float(entry_px), 2)
+        if scan_px and abs(entry_px - scan_px) >= 0.05:
+            log(f"  {label}  {sym}: scanner ₹{scan_px:,.2f} → live entry ₹{entry_px:,.2f}")
 
         sec = SECTOR_MAP.get(sym)
         if sec and sector_count.get(sec, 0) >= MAX_PER_SECTOR:
@@ -677,12 +694,15 @@ def _open_positions(portfolio, signals, macro, fii_net, today, label=""):
     return entered
 
 
-def enter_confirm_positions(signals, macro, fii_net):
+def enter_confirm_positions(signals, macro, fii_net, entry_prices=None):
     """Open shadow positions for EOD Confirm strategy (called at 3:30)."""
     portfolio = load_portfolio(CONFIRM_PORTFOLIO_FILE)
     today = datetime.now().strftime("%Y-%m-%d")
     log("\n  ── Confirm Strategy Entries (3:30) ──")
-    entered = _open_positions(portfolio, signals, macro, fii_net, today, label="[confirm] ")
+    entered = _open_positions(
+        portfolio, signals, macro, fii_net, today,
+        label="[confirm] ", entry_prices=entry_prices,
+    )
     save_portfolio(portfolio, CONFIRM_PORTFOLIO_FILE)
     return entered
 
@@ -741,8 +761,7 @@ def run(intraday_only=False):
     _open_positions(portfolio, signals, macro, fii_net, today)
 
     all_syms = list(set(portfolio["positions"]) | set(confirm_pf["positions"]))
-    all_prices = fetch_prices(all_syms) if all_syms else {}
-    all_prices = {**curr_prices, **all_prices}
+    all_prices = _merge_prices(curr_prices, all_syms)
 
     unrealised  = sum(
         ((all_prices.get(s) or p["entry_price"]) - p["entry_price"]) * p["quantity"]

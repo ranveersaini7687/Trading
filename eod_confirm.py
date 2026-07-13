@@ -13,7 +13,7 @@ import json
 import os
 from datetime import datetime
 
-from angel_api import AngelOneAPI
+from angel_api import fetch_quotes
 from long_buildup_scanner import MIN_VOLUME_RATIO, get_avg_volumes_data
 
 SHORTLIST_FILE = "eod_shortlist.json"
@@ -23,8 +23,6 @@ PORTFOLIO_FILE = "paper_portfolio.json"
 
 DAY_RANGE_TOP_PCT = 0.75
 NEAR_HIGH_RATIO = 0.995
-
-angel = AngelOneAPI()
 
 
 def log(msg):
@@ -151,7 +149,7 @@ def run_confirm():
     log(f"  EOD Confirm — evaluating {len(signals)} shortlist candidate(s) @ {now_s}")
 
     symbols = [s["symbol"] for s in signals]
-    quotes = angel.get_quotes(symbols)
+    quotes = fetch_quotes(symbols)
     avg_vols = get_avg_volumes_data(symbols)
 
     confirm_log = _load_confirm_log()
@@ -217,7 +215,14 @@ def run_confirm():
     entered_syms = set()
     if passed:
         import paper_trader
-        entered_syms = paper_trader.enter_confirm_positions(passed, macro, fii_net)
+        entry_ltps = {
+            sym: round(q["ltp"], 2)
+            for sym, q in quotes.items()
+            if q.get("ltp")
+        }
+        entered_syms = paper_trader.enter_confirm_positions(
+            passed, macro, fii_net, entry_prices=entry_ltps,
+        )
         for row in confirm_log["entries"]:
             if row["confirm_pass"] and row["symbol"] in entered_syms:
                 row["confirm_entered"] = True

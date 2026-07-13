@@ -10,9 +10,7 @@ import time
 import json
 import functools
 from datetime import datetime, timedelta
-from angel_api import AngelOneAPI
-
-angel = AngelOneAPI()
+from angel_api import get_client
 
 # ── Config ────────────────────────────────────────────────────────────────────
 HEADERS = {
@@ -116,7 +114,7 @@ def get_price_changes(symbols):
     """
     log(f"Step 2 — Live quotes for {len(symbols)} stocks (Angel One)")
     try:
-        quotes = angel.get_quotes(symbols)
+        quotes = get_client().get_quotes(symbols)
     except Exception as e:
         log(f"  !! Angel One quote fetch failed: {e}")
         return {s: None for s in symbols}, {s: None for s in symbols}, {s: 0 for s in symbols}
@@ -143,7 +141,7 @@ def get_avg_volumes_data(symbols):
     log(f"Step 3b — 20-day avg volumes for {len(symbols)} stocks (Angel One)")
     if not symbols:
         return {}
-    avg_vols = angel.get_avg_volumes(symbols)
+    avg_vols = get_client().get_avg_volumes(symbols)
     log(f"  → Avg volumes fetched for {len(avg_vols)} stocks")
     return avg_vols
 
@@ -153,7 +151,7 @@ def get_ema_stack_data(symbols):
     log(f"Step 3c — EMA stack ({'/'.join(str(p) for p in EMA_PERIODS)}) for {len(symbols)} stocks")
     if not symbols:
         return {}
-    ema_data = angel.get_ema_stack(symbols)
+    ema_data = get_client().get_ema_stack(symbols)
     log(f"  → EMA stack computed for {len(ema_data)} stocks")
     return ema_data
 
@@ -170,7 +168,7 @@ def get_live_pcr_data(symbols):
     pcr_map, liquid_stocks = {}, set()
     for sym in symbols:
         try:
-            pcr, liquid = angel.get_pcr(sym)
+            pcr, liquid = get_client().get_pcr(sym)
             if pcr is not None:
                 pcr_map[sym] = pcr
             if liquid:

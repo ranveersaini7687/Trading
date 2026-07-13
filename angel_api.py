@@ -348,3 +348,28 @@ class AngelOneAPI:
         pcr       = round(pe_oi / ce_oi, 2) if ce_oi > 0 else None
         is_liquid = (ce_oi + pe_oi) >= 500
         return pcr, is_liquid
+
+
+# ── Shared client (one login session per process) ─────────────────────────────
+_shared_client = None
+
+
+def get_client():
+    """Return the process-wide AngelOneAPI instance."""
+    global _shared_client
+    if _shared_client is None:
+        _shared_client = AngelOneAPI()
+    return _shared_client
+
+
+def fetch_quotes(symbols):
+    """Live NSE equity quotes — single entry point for all modules."""
+    if not symbols:
+        return {}
+    return get_client().get_quotes(list(symbols))
+
+
+def fetch_ltps(symbols):
+    """LTP only, rounded to 2 decimals."""
+    quotes = fetch_quotes(symbols)
+    return {sym: round(q["ltp"], 2) for sym, q in quotes.items() if q.get("ltp")}
