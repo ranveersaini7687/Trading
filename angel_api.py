@@ -29,6 +29,7 @@ class AngelOneAPI:
         self.jwt_token   = None
         self._token_date = None
         self._token_map  = None   # NSE symbol -> symbolToken
+        self._index_map  = None   # index name -> symbolToken (e.g. NIFTY)
         self._nfo_map    = None   # {name: [{token, expiry, strike, optiontype}]}
 
     # ── Headers ───────────────────────────────────────────────────────────────
@@ -83,6 +84,7 @@ class AngelOneAPI:
         master = resp.json()
 
         token_map = {}
+        index_map = {}
         nfo_map   = {}
 
         for item in master:
@@ -94,6 +96,12 @@ class AngelOneAPI:
                 sym = item.get("symbol", "").replace("-EQ", "").replace("-BE", "").strip()
                 if sym:
                     token_map[sym] = str(item["token"])
+
+            # NSE indices (Nifty 50 for macro direction capture)
+            elif seg == "NSE" and itype == "AMXIDX":
+                name = (item.get("name") or item.get("symbol") or "").strip().upper()
+                if name in ("NIFTY", "NIFTY 50", "NIFTY50"):
+                    index_map["NIFTY"] = str(item["token"])
 
             # NFO stock options (OPTSTK)
             elif seg == "NFO" and itype == "OPTSTK":
@@ -113,8 +121,10 @@ class AngelOneAPI:
                     })
 
         self._token_map = token_map
+        self._index_map = index_map
         self._nfo_map   = nfo_map
-        print(f"  [angel] Scrip master loaded: {len(token_map)} NSE  |  {len(nfo_map)} NFO names")
+        print(f"  [angel] Scrip master loaded: {len(token_map)} NSE  |  {len(nfo_map)} NFO names"
+              f"  |  {len(index_map)} indices")
 
     def _load_token_map(self):
         self._load_scrip_master()
@@ -280,7 +290,7 @@ class AngelOneAPI:
         """
         Calculate PCR and liquidity from Angel One NFO option chain data.
         Uses near-month expiry + ATM ±15% strikes.
-        Returns (pcr, is_liquid).
+        Returns dict with pcr, ce_oi, pe_oi, total_oi, is_liquid (or None if unavailable).
         """
         self.ensure_session()
         if not self._nfo_map:
@@ -288,7 +298,7 @@ class AngelOneAPI:
 
         instruments = self._nfo_map.get(symbol, [])
         if not instruments:
-            return None, False
+            return None
 
         # Find nearest expiry
         def parse_expiry(e):
@@ -309,7 +319,7 @@ class AngelOneAPI:
         if not near_expiry:
             near_expiry = expiries[0] if expiries else None
         if not near_expiry:
-            return None, False
+            return None
 
         near_opts = [
             i for i in instruments
@@ -317,7 +327,7 @@ class AngelOneAPI:
         ]
 
         if not near_opts:
-            return None, False
+            return None
 
         # Fetch OI for all near-month ATM options in one batch call
         tokens    = [i["token"] for i in near_opts]
@@ -346,8 +356,44 @@ class AngelOneAPI:
                             pe_oi += oi
 
         pcr       = round(pe_oi / ce_oi, 2) if ce_oi > 0 else None
-        is_liquid = (ce_oi + pe_oi) >= 500
-        return pcr, is_liquid
+        total_oi  = ce_oi + pe_oi
+        is_liquid = total_oi >= 500
+        return {
+            "pcr": pcr,
+            "ce_oi": ce_oi,
+            "pe_oi": pe_oi,
+            "total_oi": total_oi,
+            "is_liquid": is_liquid,
+        }
+
+    def get_index_quote(self, index_name="NIFTY"):
+        """Fetch LTP and prev close for an NSE index."""
+        self.ensure_session()
+        if self._index_map is None:
+            self._load_scrip_master()
+        token = (self._index_map or {}).get(index_name)
+        if not token:
+            return None
+        resp = requests.post(
+            f"{ANGEL_BASE}/rest/secure/angelbroking/market/v1/quote/",
+            headers=self._auth_headers(),
+            json={"mode": "FULL", "exchangeTokens": {"NSE": [token]}},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        if not body.get("status") or not body.get("data"):
+            return None
+        fetched = body["data"].get("fetched", [])
+        if not fetched:
+            return None
+        item = fetched[0]
+        ltp = float(item.get("ltp") or 0)
+        prev_close = float(item.get("close") or 0)
+        if not ltp or not prev_close:
+            return None
+        chg_pct = round((ltp - prev_close) / prev_close * 100, 2)
+        return {"nifty_ltp": round(ltp, 2), "nifty_chg_pct": chg_pct}
 
 
 # ── Shared client (one login session per process) ─────────────────────────────
@@ -373,3 +419,12 @@ def fetch_ltps(symbols):
     """LTP only, rounded to 2 decimals."""
     quotes = fetch_quotes(symbols)
     return {sym: round(q["ltp"], 2) for sym, q in quotes.items() if q.get("ltp")}
+
+
+def fetch_nifty_day_change():
+    """Nifty 50 day % change for macro direction capture (no gating in Phase 1)."""
+    try:
+        return get_client().get_index_quote("NIFTY")
+    except Exception as e:
+        print(f"  [angel] Nifty index fetch failed: {e}")
+        return None

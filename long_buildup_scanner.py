@@ -10,7 +10,8 @@ import time
 import json
 import functools
 from datetime import datetime, timedelta
-from angel_api import get_client
+from angel_api import get_client, fetch_nifty_day_change
+from model_scoring import attach_scores
 
 # ── Config ────────────────────────────────────────────────────────────────────
 HEADERS = {
@@ -22,9 +23,9 @@ HEADERS = {
     "Connection": "keep-alive",
 }
 
-MIN_PCR           = 0.8
+MIN_PCR           = 0.7
 MIN_OI_CHANGE_PCT = 2.0
-MIN_VOLUME_RATIO  = 1.5   # today's volume must be >= 1.5× 20-day average
+MIN_VOLUME_RATIO  = 1.2   # today's volume must be >= 1.2× 20-day average
 EMA_PERIODS       = (9, 21, 50)   # bullish stack: price > 9 EMA > 21 EMA > 50 EMA
 SKIP_SYMBOLS      = {"NIFTY", "FINNIFTY", "BANKNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "NIFTYNXT50"}
 CACHE_DIR         = "cache"
@@ -159,25 +160,38 @@ def get_ema_stack_data(symbols):
 # ── Step 4: Live option chain — PCR + liquidity (Angel One NFO) ──────────────
 def get_live_pcr_data(symbols):
     """
-    Fetch live PCR for each symbol via Angel One NFO option chain (all strikes, near expiry).
-    Returns ({symbol: pcr}, {symbol: is_liquid}).
+    Fetch live PCR + liquidity for each symbol via Angel One NFO option chain.
+    Returns {symbol: {pcr, ce_oi, pe_oi, total_oi, is_liquid}}.
     """
     log(f"Step 4 — Live option chain PCR for {len(symbols)} stocks (Angel One NFO)")
     if not symbols:
-        return {}, set()
-    pcr_map, liquid_stocks = {}, set()
+        return {}
+    pcr_data = {}
     for sym in symbols:
         try:
-            pcr, liquid = get_client().get_pcr(sym)
-            if pcr is not None:
-                pcr_map[sym] = pcr
-            if liquid:
-                liquid_stocks.add(sym)
+            data = get_client().get_pcr(sym)
+            if data:
+                pcr_data[sym] = data
         except Exception as e:
             log(f"  !! {sym}: Angel One PCR failed — {e}")
 
-    log(f"  → PCR fetched for {len(pcr_map)}/{len(symbols)} stocks  |  {len(liquid_stocks)} liquid")
-    return pcr_map, liquid_stocks
+    liquid_n = sum(1 for d in pcr_data.values() if d.get("is_liquid"))
+    log(f"  → PCR fetched for {len(pcr_data)}/{len(symbols)} stocks  |  {liquid_n} liquid")
+    return pcr_data
+
+
+def _attach_pcr_fields(stock, pcr_data):
+    """Merge PCR and liquidity fields onto a stock dict."""
+    sym = stock["symbol"]
+    pd = pcr_data.get(sym) or {}
+    return {
+        **stock,
+        "pcr": pd.get("pcr"),
+        "ce_oi": pd.get("ce_oi"),
+        "pe_oi": pd.get("pe_oi"),
+        "total_oi": pd.get("total_oi"),
+        "is_liquid": pd.get("is_liquid", False),
+    }
 
 
 # ── Step 7: FII/DII flow data ─────────────────────────────────────────────────
@@ -316,6 +330,13 @@ def scan():
     MACRO_ICON = {"BULLISH": "▲", "NEUTRAL": "─", "BEARISH": "▼"}
     icon = MACRO_ICON.get(macro["sentiment"], "?")
 
+    nifty_data = fetch_nifty_day_change() or {}
+    nifty_chg = nifty_data.get("nifty_chg_pct")
+    if nifty_chg is not None:
+        log(f"\n  ── Nifty 50 ──  LTP ₹{nifty_data.get('nifty_ltp', 0):,.2f}  Day: {nifty_chg:+.2f}%")
+    else:
+        log("\n  ── Nifty 50 ──  (unavailable)")
+
     log(f"\n  ── Institutional Flow (Today) ──")
     log(f"     FII   Buy: ₹{fii_dii_data.get('fii_buy', 0):>10,.2f} Cr   Sell: ₹{fii_dii_data.get('fii_sell', 0):>10,.2f} Cr   Net: ₹{macro['fii_net']:>+10,.2f} Cr")
     log(f"     DII   Buy: ₹{fii_dii_data.get('dii_buy', 0):>10,.2f} Cr   Sell: ₹{fii_dii_data.get('dii_sell', 0):>10,.2f} Cr   Net: ₹{macro['dii_net']:>+10,.2f} Cr")
@@ -400,23 +421,31 @@ def scan():
     # Step 4 — Live option chain PCR (only for EMA-confirmed stocks)
     lb_symbols  = [s["symbol"] for s in ema_passed]
     try:
-        pcr_map, liquid_stocks = get_live_pcr_data(lb_symbols)
+        pcr_data_map = get_live_pcr_data(lb_symbols)
     except Exception as e:
         log(f"  !! Option chain fetch failed: {e}")
-        pcr_map, liquid_stocks = {}, set()
+        pcr_data_map = {}
+
+    # Score all EMA-passed candidates (including PCR/liquidity failures)
+    scored_candidates = [
+        attach_scores(_attach_pcr_fields(stock, pcr_data_map), nifty_chg)
+        for stock in ema_passed
+    ]
 
     # Step 5 — PCR + liquidity filter
     log(f"Step 5 — PCR >= {MIN_PCR} + Liquid only")
     results = []
-    for stock in ema_passed:
+    shadow_scores = []
+    for stock in scored_candidates:
         sym     = stock["symbol"]
-        pcr     = pcr_map.get(sym)
-        liquid  = sym in liquid_stocks
+        pcr     = stock.get("pcr")
+        liquid  = stock.get("is_liquid", False)
         pcr_str = f"{pcr:.2f}" if pcr is not None else "N/A"
         if pcr is not None and pcr >= MIN_PCR and liquid:
-            results.append({**stock, "pcr": pcr})
+            results.append(stock)
             log(f"  ✓✓ {sym:<15} PCR: {pcr_str}  liquid: yes  → MATCH")
         else:
+            shadow_scores.append(stock)
             reasons = []
             if pcr is None or pcr < MIN_PCR: reasons.append(f"PCR {pcr_str}")
             if not liquid: reasons.append("illiquid")
@@ -450,10 +479,24 @@ def scan():
 
     output = {
         "scan_time": datetime.now().isoformat(),
-        "criteria": {"min_oi_chg_pct": MIN_OI_CHANGE_PCT, "min_pcr": MIN_PCR},
-        "macro":    {"sentiment": sentiment, "total_buy_cr": macro["total_buy"], "total_sell_cr": macro["total_sell"], "total_net_cr": macro["total_net"], "fii_net_cr": macro["fii_net"], "dii_net_cr": macro["dii_net"]},
-        "summary":  {"oi_spurt_stocks": len(oi_stocks), "long_buildup": len(long_buildup), "vol_passed": len(vol_passed), "ema_passed": len(ema_passed), "matched": len(results)},
+        "criteria": {
+            "min_oi_chg_pct": MIN_OI_CHANGE_PCT,
+            "min_pcr": MIN_PCR,
+            "min_volume_ratio": MIN_VOLUME_RATIO,
+        },
+        "nifty": nifty_data,
+        "macro":    {
+            "sentiment": sentiment,
+            "total_buy_cr": macro["total_buy"],
+            "total_sell_cr": macro["total_sell"],
+            "total_net_cr": macro["total_net"],
+            "fii_net_cr": macro["fii_net"],
+            "dii_net_cr": macro["dii_net"],
+            "nifty_chg_pct": nifty_chg,
+        },
+        "summary":  {"oi_spurt_stocks": len(oi_stocks), "long_buildup": len(long_buildup), "vol_passed": len(vol_passed), "ema_passed": len(ema_passed), "matched": len(results), "shadow_scored": len(shadow_scores)},
         "results":  results,
+        "shadow_scores": shadow_scores,
     }
     with open("scan_results.json", "w") as f:
         json.dump(output, f, indent=2)

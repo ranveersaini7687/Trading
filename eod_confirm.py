@@ -3,7 +3,7 @@
 EOD Confirm — Stage-2 intraday filter (3:30 PM) on top of the 3:25 scanner shortlist.
 
 Stage 1 (3:25): existing scanner filters → saved to eod_shortlist.json
-Stage 2 (3:30): vol >= 1.5x AND (close > open OR near day high OR new high)
+Stage 2 (3:30): vol >= 1.2x AND (close > open OR near day high OR new high)
 
 Logs every candidate to eod_confirm_log.json.
 Confirm-passing signals open positions in paper_portfolio_confirm.json (shadow book).
@@ -161,7 +161,7 @@ def run_confirm():
     macro = shortlist.get("macro", {}).get("sentiment", "UNKNOWN")
     fii_net = float(shortlist.get("macro", {}).get("fii_net_cr", 0) or 0)
 
-    from paper_trader import SECTOR_MAP
+    from paper_trader import SECTOR_MAP, _model_liquidity_storage
 
     for sig in signals:
         sym = sig["symbol"]
@@ -182,6 +182,7 @@ def run_confirm():
             "pcr": sig.get("pcr"),
             "sector": sec,
             "macro": macro,
+            **_model_liquidity_storage(sig),
             "open": ev["open"],
             "high": ev["high"],
             "low": ev["low"],

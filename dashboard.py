@@ -471,7 +471,9 @@ def main():
             if closed:
                 cdf = pd.DataFrame(closed).sort_values("exit_date", ascending=False)
                 show_cols = ["symbol", "entry_date", "exit_date", "entry_price", "exit_price",
-                             "pnl_abs", "pnl_pct", "reason", "hold_days", "oi_chg", "price_chg", "sector"]
+                             "pnl_abs", "pnl_pct", "reason", "hold_days", "oi_chg", "price_chg",
+                             "quality_ratio", "composite_abc", "model_f", "model_f_pass",
+                             "suggested_action", "ce_oi", "total_oi", "sector"]
                 show_cols = [c for c in show_cols if c in cdf.columns]
                 st.dataframe(cdf[show_cols].head(30), hide_index=True, use_container_width=True)
             else:
@@ -519,10 +521,19 @@ def main():
             )
 
             signals = scan.get("results", [])
+            nifty_chg = scan.get("macro", {}).get("nifty_chg_pct") or scan.get("nifty", {}).get("nifty_chg_pct")
+            if nifty_chg is not None:
+                st.caption(f"Nifty 50 day: {nifty_chg:+.2f}%")
             if signals:
                 st.markdown("#### today's scanner matches")
                 sdf = pd.DataFrame(signals)
-                cols = [c for c in ["symbol", "price_chg", "oi_chg", "vol_ratio", "pcr", "spot_price"] if c in sdf.columns]
+                cols = [c for c in [
+                    "symbol", "price_chg", "oi_chg", "vol_ratio", "pcr",
+                    "ce_oi", "pe_oi", "total_oi", "is_liquid",
+                    "quality_ratio", "model_a", "model_b", "model_c", "model_d",
+                    "model_e", "model_f", "composite_abc", "model_f_pass",
+                    "suggested_action", "nifty_chg_pct", "spot_price",
+                ] if c in sdf.columns]
                 st.dataframe(sdf[cols], hide_index=True, use_container_width=True)
             else:
                 st.caption("no scanner matches today")
@@ -535,6 +546,8 @@ def main():
                 edf = pd.DataFrame(today_entries)
                 show = [c for c in [
                     "symbol", "confirm_pass", "vol_ratio_scan", "vol_ratio_confirm",
+                    "composite_abc", "model_f", "model_f_pass", "suggested_action",
+                    "ce_oi", "total_oi", "quality_ratio",
                     "close_gt_open", "near_day_high", "baseline_entered", "confirm_entered", "fail_reason",
                 ] if c in edf.columns]
                 st.dataframe(edf[show], hide_index=True, use_container_width=True)

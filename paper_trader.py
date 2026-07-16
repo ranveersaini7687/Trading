@@ -189,6 +189,74 @@ def _fmt_entry_val(val):
     return val
 
 
+def _model_liquidity_storage(record):
+    """Liquidity + model score fields from scanner signal."""
+    return {
+        "ce_oi":            record.get("ce_oi"),
+        "pe_oi":            record.get("pe_oi"),
+        "total_oi":         record.get("total_oi"),
+        "is_liquid":        record.get("is_liquid"),
+        "quality_ratio":    record.get("quality_ratio"),
+        "model_a":          record.get("model_a"),
+        "model_b":          record.get("model_b"),
+        "model_c":          record.get("model_c"),
+        "model_d":          record.get("model_d"),
+        "model_e":          record.get("model_e"),
+        "model_f":          record.get("model_f"),
+        "composite_abc":    record.get("composite_abc"),
+        "model_f_pass":     record.get("model_f_pass"),
+        "suggested_action": record.get("suggested_action"),
+        "nifty_chg_pct":    record.get("nifty_chg_pct"),
+    }
+
+
+def _model_liquidity_excel_cols(record):
+    liquid = record.get("is_liquid")
+    if liquid is True:
+        liquid_col = "Yes"
+    elif liquid is False:
+        liquid_col = "No"
+    else:
+        liquid_col = "-"
+    mfp = record.get("model_f_pass")
+    if mfp is True:
+        mfp_col = "Yes"
+    elif mfp is False:
+        mfp_col = "No"
+    else:
+        mfp_col = "-"
+    return {
+        "CE OI":            _fmt_entry_val(record.get("ce_oi")),
+        "PE OI":            _fmt_entry_val(record.get("pe_oi")),
+        "Total OI":         _fmt_entry_val(record.get("total_oi")),
+        "Liquid":           liquid_col,
+        "Quality Ratio":    _fmt_entry_val(record.get("quality_ratio")),
+        "Model A":          _fmt_entry_val(record.get("model_a")),
+        "Model B":          _fmt_entry_val(record.get("model_b")),
+        "Model C":          _fmt_entry_val(record.get("model_c")),
+        "Model D":          _fmt_entry_val(record.get("model_d")),
+        "Model E":          _fmt_entry_val(record.get("model_e")),
+        "Model F":          _fmt_entry_val(record.get("model_f")),
+        "Composite ABC":    _fmt_entry_val(record.get("composite_abc")),
+        "Model F Pass":     mfp_col,
+        "Suggested Action": record.get("suggested_action") or "-",
+        "Nifty Chg %":      _fmt_entry_val(record.get("nifty_chg_pct")),
+    }
+
+
+_LEGACY_SIGNAL_COLS = {
+    "Price Chg %": "-", "OI Chg %": "-", "Vol Ratio": "-", "PCR": "-",
+    "Sector": "-", "EMA9": "-", "EMA21": "-", "EMA50": "-",
+    "Latest OI": "-", "Entry Time": "-", "NSE TS": "-",
+}
+_LEGACY_MODEL_COLS = {
+    "CE OI": "-", "PE OI": "-", "Total OI": "-", "Liquid": "-",
+    "Quality Ratio": "-", "Model A": "-", "Model B": "-", "Model C": "-",
+    "Model D": "-", "Model E": "-", "Model F": "-", "Composite ABC": "-",
+    "Model F Pass": "-", "Suggested Action": "-", "Nifty Chg %": "-",
+}
+
+
 def _entry_storage(record):
     """Persist full scanner signal snapshot on positions and closed_trades."""
     return {
@@ -210,6 +278,7 @@ def _entry_storage(record):
         "entry_time":  record.get("entry_time") or datetime.now().strftime("%H:%M:%S"),
         # NSE scan timestamp (tells us lag between scan data and entry)
         "nse_ts":      record.get("nse_ts"),
+        **_model_liquidity_storage(record),
     }
 
 
@@ -222,18 +291,9 @@ def _entry_excel_cols(record):
     macro = record.get("macro_entry", "?")
     if record.get("price_chg") is None:
         return {
-            "Price Chg %": "-",
-            "OI Chg %":    "-",
-            "Vol Ratio":   "-",
-            "PCR":         "-",
-            "Sector":      "-",
-            "Macro":       macro,
-            "EMA9":        "-",
-            "EMA21":       "-",
-            "EMA50":       "-",
-            "Latest OI":   "-",
-            "Entry Time":  "-",
-            "NSE TS":      "-",
+            **_LEGACY_SIGNAL_COLS,
+            "Macro": macro,
+            **_LEGACY_MODEL_COLS,
         }
     return {
         "Price Chg %": _fmt_entry_val(record.get("price_chg")),
@@ -248,6 +308,7 @@ def _entry_excel_cols(record):
         "Latest OI":   _fmt_entry_val(record.get("latest_oi")),
         "Entry Time":  record.get("entry_time", "-"),
         "NSE TS":      record.get("nse_ts", "-"),
+        **_model_liquidity_excel_cols(record),
     }
 
 
@@ -255,12 +316,18 @@ ALL_TRADES_COLUMNS = [
     "Symbol", "Entry Date", "Exit Date", "Entry ₹", "Exit ₹", "CMP ₹", "Qty",
     "Price Chg %", "OI Chg %", "Vol Ratio", "PCR", "Sector", "Macro",
     "EMA9", "EMA21", "EMA50", "Latest OI", "Entry Time", "NSE TS",
+    "CE OI", "PE OI", "Total OI", "Liquid",
+    "Quality Ratio", "Model A", "Model B", "Model C", "Model D", "Model E", "Model F",
+    "Composite ABC", "Model F Pass", "Suggested Action", "Nifty Chg %",
     "P&L ₹", "P&L %", "Status", "Exit Reason",
 ]
 
 EOD_CONFIRM_COLUMNS = [
     "Date", "Symbol", "Scan Time", "Confirm Time",
     "Price Chg %", "OI Chg %", "Vol 3:15", "Vol 3:27", "PCR", "Sector", "Macro",
+    "CE OI", "PE OI", "Total OI", "Liquid",
+    "Quality Ratio", "Model A", "Model B", "Model C", "Model D", "Model E", "Model F",
+    "Composite ABC", "Model F Pass", "Suggested Action", "Nifty Chg %",
     "Open ₹", "High ₹", "Low ₹", "LTP ₹",
     "Close>Open", "Near High", "New High",
     "Confirm Pass", "Baseline Entered", "Confirm Entered", "Fail Reason",
@@ -325,6 +392,7 @@ def _eod_confirm_rows():
             "PCR": _fmt_entry_val(e.get("pcr")),
             "Sector": e.get("sector", "-"),
             "Macro": e.get("macro", "?"),
+            **_model_liquidity_excel_cols(e),
             "Open ₹": _fmt_entry_val(e.get("open")),
             "High ₹": _fmt_entry_val(e.get("high")),
             "Low ₹": _fmt_entry_val(e.get("low")),
@@ -663,19 +731,9 @@ def _open_positions(portfolio, signals, macro, fii_net, today, label="", entry_p
             "stop_loss": sl_px,
             "target": tgt_px,
             **_entry_storage({
-                "price_chg":   sig.get("price_chg"),
-                "oi_chg":      sig.get("oi_chg"),
-                "vol_ratio":   sig.get("vol_ratio"),
-                "pcr":         sig.get("pcr"),
-                "sector":      sec or "-",
+                **sig,
+                "sector": sec or "-",
                 "macro_entry": macro,
-                # pass through EMA and OI fields from scanner signal
-                "ema9":        sig.get("ema9"),
-                "ema21":       sig.get("ema21"),
-                "ema50":       sig.get("ema50"),
-                "latest_oi":   sig.get("latest_oi"),
-                "prev_oi":     sig.get("prev_oi"),
-                "nse_ts":      sig.get("nse_ts"),
             }),
         }
         if sec:
