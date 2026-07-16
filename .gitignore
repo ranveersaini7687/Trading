@@ -1,7 +1,12 @@
 # Runtime data — each environment has its own
 paper_portfolio.json
+paper_portfolio_confirm.json
 scan_results.json
 trade_log.xlsx
+eod_shortlist.json
+eod_confirm_log.json
+activity_log.jsonl
+bot_status.json
 
 # Cache — all downloaded fresh each run except FII daily history
 cache/oi_spurts_*.json
