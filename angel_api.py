@@ -439,7 +439,7 @@ class AngelOneAPI:
             "transactiontype": order_type,
             "exchange": "NSE",
             "ordertype": "MARKET" if price is None else "LIMIT",
-            "producttype": "INTRADAY",
+            "producttype": "DELIVERY",
             "duration": "DAY",
             "price": "0" if price is None else str(price),
             "squareoff": "0",
@@ -510,6 +510,105 @@ class AngelOneAPI:
                 return {"status": False, "order_id": order_id, "message": body.get("message", "Unknown error")}
         except Exception as e:
             return {"status": False, "order_id": order_id, "message": str(e)}
+
+    # ── GTT (Good-Till-Triggered) rules ───────────────────────────────────────
+    # Note: create/modify/cancel use the /gtt-service/... path prefix;
+    # details/list use the plain /rest/secure/... prefix — this split is
+    # deliberate and matches Angel One's actual route table.
+    def create_gtt_rule(self, symbol, transaction_type, qty, trigger_price, limit_price,
+                         producttype="DELIVERY", timeperiod=365):
+        """
+        Create a GTT rule — a broker-side conditional order that Angel One's
+        own servers trigger when price crosses trigger_price, independent of
+        whether our bot is running. Returns {"status", "rule_id", "message"}.
+        """
+        self.ensure_session()
+        if not self._token_map:
+            self._load_scrip_master()
+
+        token = self._token_map.get(symbol)
+        if not token:
+            return {"status": False, "rule_id": None, "message": f"Symbol {symbol} not found"}
+
+        rule_data = {
+            "tradingsymbol": f"{symbol}-EQ",
+            "symboltoken": token,
+            "exchange": "NSE",
+            "producttype": producttype,
+            "transactiontype": transaction_type,
+            "price": round(limit_price, 2),
+            "qty": qty,
+            "disclosedqty": qty,
+            "triggerprice": round(trigger_price, 2),
+            "timeperiod": timeperiod,
+        }
+
+        try:
+            resp = requests.post(
+                f"{ANGEL_BASE}/gtt-service/rest/secure/angelbroking/gtt/v1/createRule",
+                headers=self._auth_headers(),
+                json=rule_data,
+                timeout=15,
+            )
+            body = self._parse_order_response(resp)
+
+            if body.get("status"):
+                rule_id = body.get("data", {}).get("id")
+                return {"status": True, "rule_id": rule_id, "message": "GTT rule created"}
+            else:
+                return {"status": False, "rule_id": None, "message": body.get("message", "Unknown error")}
+        except Exception as e:
+            return {"status": False, "rule_id": None, "message": str(e)}
+
+    def cancel_gtt_rule(self, rule_id, symbol):
+        """Cancel a GTT rule (e.g. the untriggered sibling once one fires)."""
+        self.ensure_session()
+        if not self._token_map:
+            self._load_scrip_master()
+        token = self._token_map.get(symbol)
+        if not token:
+            return {"status": False, "rule_id": rule_id, "message": f"Symbol {symbol} not found"}
+
+        try:
+            resp = requests.post(
+                f"{ANGEL_BASE}/gtt-service/rest/secure/angelbroking/gtt/v1/cancelRule",
+                headers=self._auth_headers(),
+                json={"id": rule_id, "symboltoken": token, "exchange": "NSE"},
+                timeout=15,
+            )
+            body = self._parse_order_response(resp)
+
+            if body.get("status"):
+                return {"status": True, "rule_id": rule_id, "message": "GTT rule cancelled"}
+            else:
+                return {"status": False, "rule_id": rule_id, "message": body.get("message", "Unknown error")}
+        except Exception as e:
+            return {"status": False, "rule_id": rule_id, "message": str(e)}
+
+    def get_gtt_rule_details(self, rule_id):
+        """
+        Look up a GTT rule's current status. Known values: NEW, ACTIVE
+        (still watching), SENTTOEXCHANGE (triggered — order placed),
+        CANCELLED. Any other/unrecognized value is returned as-is —
+        callers should treat unrecognized statuses cautiously.
+        """
+        self.ensure_session()
+        try:
+            resp = requests.post(
+                f"{ANGEL_BASE}/rest/secure/angelbroking/gtt/v1/ruleDetails",
+                headers=self._auth_headers(),
+                json={"id": rule_id},
+                timeout=15,
+            )
+            body = self._parse_order_response(resp)
+
+            if body.get("status") and body.get("data"):
+                data = body["data"]
+                return {"rule_id": rule_id, "status": data.get("status"), "message": "OK"}
+            else:
+                return {"rule_id": rule_id, "status": "UNKNOWN", "message": body.get("message", "Unknown")}
+        except Exception as e:
+            return {"rule_id": rule_id, "status": "ERROR", "message": str(e)}
 
 
 # ── Shared client (one login session per process) ─────────────────────────────
