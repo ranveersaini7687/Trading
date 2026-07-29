@@ -395,6 +395,122 @@ class AngelOneAPI:
         chg_pct = round((ltp - prev_close) / prev_close * 100, 2)
         return {"nifty_ltp": round(ltp, 2), "nifty_chg_pct": chg_pct}
 
+    # ── Live order placement ──────────────────────────────────────────────────
+    @staticmethod
+    def _parse_order_response(resp):
+        """
+        Parse an Angel One order-API response, preferring Angel's own JSON
+        'message' field (e.g. an RMS/insufficient-funds rejection) over the
+        generic HTTP status text — Angel returns a JSON body with error
+        details even on 4xx responses.
+        """
+        try:
+            body = resp.json()
+        except ValueError:
+            resp.raise_for_status()
+            raise Exception(f"Non-JSON response (HTTP {resp.status_code})")
+        return body
+
+    def place_market_order(self, symbol, order_type, qty, price=None):
+        """
+        Place a market/limit order on Angel One (NSE cash, intraday).
+
+        Args:
+            symbol (str): NSE symbol (e.g. 'INFY')
+            order_type (str): 'BUY' or 'SELL'
+            qty (int): quantity
+            price (float, optional): limit price; if None, market order
+
+        Returns:
+            dict with keys: {"status": bool, "order_id": str, "message": str}
+        """
+        self.ensure_session()
+        if not self._token_map:
+            self._load_scrip_master()
+
+        token = self._token_map.get(symbol)
+        if not token:
+            return {"status": False, "order_id": None, "message": f"Symbol {symbol} not found"}
+
+        order_data = {
+            "variety": "NORMAL",
+            "tradingsymbol": f"{symbol}-EQ",
+            "symboltoken": token,
+            "transactiontype": order_type,
+            "exchange": "NSE",
+            "ordertype": "MARKET" if price is None else "LIMIT",
+            "producttype": "INTRADAY",
+            "duration": "DAY",
+            "price": "0" if price is None else str(price),
+            "squareoff": "0",
+            "stoploss": "0",
+            "quantity": str(qty),
+        }
+
+        try:
+            resp = requests.post(
+                f"{ANGEL_BASE}/rest/secure/angelbroking/order/v1/placeOrder",
+                headers=self._auth_headers(),
+                json=order_data,
+                timeout=15,
+            )
+            body = self._parse_order_response(resp)
+
+            if body.get("status"):
+                order_id = body.get("data", {}).get("orderid")
+                return {"status": True, "order_id": order_id, "message": "Order placed successfully"}
+            else:
+                msg = body.get("message", "Unknown error")
+                return {"status": False, "order_id": None, "message": msg}
+        except Exception as e:
+            return {"status": False, "order_id": None, "message": str(e)}
+
+    def get_order_status(self, order_id):
+        """Look up an order's status from today's order book by orderid."""
+        self.ensure_session()
+        try:
+            resp = requests.get(
+                f"{ANGEL_BASE}/rest/secure/angelbroking/order/v1/getOrderBook",
+                headers=self._auth_headers(),
+                timeout=15,
+            )
+            body = self._parse_order_response(resp)
+
+            if not body.get("status"):
+                return {"order_id": order_id, "status": "UNKNOWN", "message": body.get("message", "Unknown")}
+
+            for order in body.get("data") or []:
+                if str(order.get("orderid")) == str(order_id):
+                    return {
+                        "order_id": order.get("orderid"),
+                        "status": order.get("orderstatus"),
+                        "filled_qty": int(order.get("filledshares") or 0),
+                        "average_price": float(order.get("averageprice") or 0),
+                        "message": "OK"
+                    }
+            return {"order_id": order_id, "status": "NOT_FOUND", "message": "Order not found in today's order book"}
+        except Exception as e:
+            return {"order_id": order_id, "status": "ERROR", "message": str(e)}
+
+    def cancel_order(self, order_id, variety="NORMAL"):
+        """Cancel a pending order."""
+        self.ensure_session()
+        try:
+            resp = requests.post(
+                f"{ANGEL_BASE}/rest/secure/angelbroking/order/v1/cancelOrder",
+                headers=self._auth_headers(),
+                json={"variety": variety, "orderid": order_id},
+                timeout=15,
+            )
+            body = self._parse_order_response(resp)
+
+            if body.get("status"):
+                return {"status": True, "order_id": order_id, "message": "Order cancelled successfully"}
+            else:
+                return {"status": False, "order_id": order_id, "message": body.get("message", "Unknown error")}
+        except Exception as e:
+            return {"status": False, "order_id": order_id, "message": str(e)}
+
 
 # ── Shared client (one login session per process) ─────────────────────────────
 _shared_client = None

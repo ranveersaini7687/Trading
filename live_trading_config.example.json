@@ -1,0 +1,69 @@
+{
+  "_comment": "LIVE TRADING CONFIGURATION - Copy to live_trading_config.json and customize",
+  "enabled": false,
+  "comment_enabled": "Set to true to activate live trading globally",
+
+  "live_trading_conditions": {
+    "model_b_min": 90,
+    "vol_ratio_min": 1.5,
+    "comment": "Both conditions must be true: Model B >= 90 AND vol_ratio >= 1.5"
+  },
+
+  "accounts": [
+    {
+      "name": "Primary",
+      "account_id": 1,
+      "enabled": false,
+      "comment_enabled": "Set to true to enable this account",
+      "api_key_env": "ANGEL_API_KEY",
+      "client_id_env": "ANGEL_CLIENT_ID",
+      "password_env": "ANGEL_PASSWORD",
+      "totp_secret_env": "ANGEL_TOTP_SECRET",
+      "comment_env_vars": "These env vars are set in .env file",
+      "max_capital": 500000,
+      "max_positions": 5,
+      "max_alloc_per_trade": 100000,
+      "comment_capital": "max_capital: total capital available, max_positions: max open positions, max_alloc_per_trade: ₹ per trade"
+    },
+    {
+      "name": "Secondary",
+      "account_id": 2,
+      "enabled": false,
+      "api_key_env": "ANGEL_API_KEY_2",
+      "client_id_env": "ANGEL_CLIENT_ID_2",
+      "password_env": "ANGEL_PASSWORD_2",
+      "totp_secret_env": "ANGEL_TOTP_SECRET_2",
+      "max_capital": 50000,
+      "max_positions": 2,
+      "max_alloc_per_trade": 25000
+    }
+  ],
+
+  "risk_controls": {
+    "daily_loss_limit_pct": 5.0,
+    "comment_daily_loss": "Max % daily loss across all accounts",
+    "max_sector_per_account": 1,
+    "comment_sector": "Max 1 position per sector per account",
+    "min_order_value": 10000,
+    "comment_min_order": "Minimum order value in ₹",
+    "position_sizing": "fixed_alloc",
+    "comment_position_sizing": "Use: fixed_alloc (default, ₹1L per trade)"
+  },
+
+  "notifications": {
+    "whatsapp_enabled": true,
+    "comment_whatsapp": "Send WhatsApp notifications on live orders (requires Twilio setup)",
+    "log_live_trades": true,
+    "log_file": "live_trading.log"
+  },
+
+  "dry_run": false,
+  "comment_dry_run": "Set to true to validate orders without submitting to Angel One",
+
+  "example_workflow": {
+    "step_1_test": "Set dry_run: true, run bot, check live_trading.log for [DRY RUN] messages",
+    "step_2_secondary": "Set enabled: true, account[Secondary].enabled: true, run for 1 week",
+    "step_3_primary": "Set account[Primary].enabled: true, run for 1 week, verify P&L",
+    "step_4_optimize": "Adjust model_b_min (90-95), vol_ratio_min (1.5-2.0) based on results"
+  }
+}

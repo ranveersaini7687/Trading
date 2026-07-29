@@ -23,6 +23,15 @@ from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment
 from openpyxl.utils import get_column_letter
 
+# Live trading integration
+try:
+    from live_trader import get_live_trader
+    LIVE_TRADER = get_live_trader()
+except Exception as e:
+    log_msg = f"[paper_trader] Warning: Live trading module unavailable: {e}"
+    print(log_msg, flush=True)
+    LIVE_TRADER = None
+
 # ── Config ────────────────────────────────────────────────────────────────────
 PORTFOLIO_FILE  = "paper_portfolio.json"
 CONFIRM_PORTFOLIO_FILE = "paper_portfolio_confirm.json"
@@ -282,14 +291,21 @@ def _entry_storage(record):
     }
 
 
+def _has_entry_snapshot(record):
+    """True if any entry-time signal field was stored on this trade."""
+    return any(record.get(k) is not None for k in (
+        "price_chg", "oi_chg", "vol_ratio", "pcr", "ema9", "latest_oi",
+    ))
+
+
 def _entry_excel_cols(record):
     """Map stored entry params to Excel columns.
 
-    Only trades opened after the entry-snapshot change have price_chg set.
-    Legacy trades keep Macro only; new columns show '-'.
+    Legacy trades with no snapshot fields show '-'. Partial snapshots
+    (e.g. pcr/oi_chg only) still render available columns.
     """
     macro = record.get("macro_entry", "?")
-    if record.get("price_chg") is None:
+    if not _has_entry_snapshot(record):
         return {
             **_LEGACY_SIGNAL_COLS,
             "Macro": macro,
@@ -306,14 +322,15 @@ def _entry_excel_cols(record):
         "EMA21":       _fmt_entry_val(record.get("ema21")),
         "EMA50":       _fmt_entry_val(record.get("ema50")),
         "Latest OI":   _fmt_entry_val(record.get("latest_oi")),
-        "Entry Time":  record.get("entry_time", "-"),
-        "NSE TS":      record.get("nse_ts", "-"),
+        "Entry Time":  record.get("entry_time") or "-",
+        "NSE TS":      record.get("nse_ts") or "-",
         **_model_liquidity_excel_cols(record),
     }
 
 
 ALL_TRADES_COLUMNS = [
     "Symbol", "Entry Date", "Exit Date", "Entry ₹", "Exit ₹", "CMP ₹", "Qty",
+    "Live Trade", "Live Order ID",
     "Price Chg %", "OI Chg %", "Vol Ratio", "PCR", "Sector", "Macro",
     "EMA9", "EMA21", "EMA50", "Latest OI", "Entry Time", "NSE TS",
     "CE OI", "PE OI", "Total OI", "Liquid",
@@ -357,7 +374,9 @@ def _trades_rows(portfolio, all_prices):
         closed_rows.append({
             "Symbol": t["symbol"], "Entry Date": t["entry_date"],
             "Exit Date": t["exit_date"], "Entry ₹": t["entry_price"],
-            "Exit ₹": t["exit_price"], "CMP ₹": "-", "Qty": t["quantity"],
+            "Exit ₹": t["exit_price"], "CMP ₹": t["exit_price"], "Qty": t["quantity"],
+            "Live Trade": "Yes" if t.get("live_order_id") else "No",
+            "Live Order ID": t.get("live_order_id") or "-",
             **_entry_excel_cols(t),
             "P&L ₹": t["pnl_abs"], "P&L %": t["pnl_pct"],
             "Status": "CLOSED", "Exit Reason": t["reason"],
@@ -370,6 +389,8 @@ def _trades_rows(portfolio, all_prices):
             "Symbol": sym, "Entry Date": pos["entry_date"],
             "Exit Date": "-", "Entry ₹": pos["entry_price"],
             "Exit ₹": "-", "CMP ₹": curr, "Qty": pos["quantity"],
+            "Live Trade": "Yes" if pos.get("live_order_id") else "No",
+            "Live Order ID": pos.get("live_order_id") or "-",
             **_entry_excel_cols(pos),
             "P&L ₹": pnl, "P&L %": pnl_pct,
             "Status": "OPEN", "Exit Reason": "-",
@@ -485,6 +506,8 @@ def _open_positions_rows(portfolio, all_prices):
             "Symbol": sym,
             "Entry Date": pos["entry_date"],
             "Entry ₹": pos["entry_price"],
+            "Live Trade": "Yes" if pos.get("live_order_id") else "No",
+            "Live Order ID": pos.get("live_order_id") or "-",
             **_entry_excel_cols(pos),
             "CMP ₹": curr,
             "Qty": pos["quantity"],
@@ -643,10 +666,16 @@ def _process_exits(portfolio, curr_prices, today, label=""):
             "pnl_pct": pnl_pct,
             "reason": reason,
             "hold_days": hold_days,
+            "live_order_id": pos.get("live_order_id"),
             **_entry_storage(pos),
         })
         sign = "+" if pnl_abs >= 0 else ""
         log(f"  ✗ {prefix}CLOSED {sym:<14} Exit ₹{exit_px:.2f}  P&L ₹{sign}{pnl_abs:,.0f} ({sign}{pnl_pct:.2f}%)  [{reason}]")
+        # NOTE: any live order for this symbol is NOT closed here — the paper
+        # SL(-1%)/target(+2%) differs from the live trade's own SL(-0.65%)/
+        # target(+2%). Live positions are monitored independently via
+        # LIVE_TRADER.check_and_exit_positions() in run().
+
         try:
             import bot_status
             bot_status.log_activity("trade", f"CLOSED {sym} [{reason}] P&L ₹{sign}{pnl_abs:,.0f}",
@@ -742,6 +771,21 @@ def _open_positions(portfolio, signals, macro, fii_net, today, label="", entry_p
         entered.add(sym)
         log(f"  {label}+ OPEN  {sym:<14} {qty} sh @ ₹{entry_px:,.2f}"
             f"  invested ₹{invested:,.0f}  SL ₹{sl_px:.2f}  T ₹{tgt_px:.2f}  [{macro}]")
+
+        # Attempt live order if conditions met (Model B >= 90 AND vol_ratio >= 1.5).
+        # Live sizing/SL/target are independent of the paper trade above —
+        # see live_trader.py — so only the order_id is tagged here for reporting.
+        if LIVE_TRADER:
+            try:
+                live_result = LIVE_TRADER.place_live_order(sig, entry_px)
+                if live_result["placed"]:
+                    log(f"  {label}🔴 LIVE  {sym:<14} Order ID: {live_result['order_id']}")
+                    portfolio["positions"][sym]["live_order_id"] = live_result["order_id"]
+                else:
+                    log(f"  {label}⚪ PAPER-ONLY {sym:<14} ({live_result['reason']})")
+            except Exception as e:
+                log(f"  {label}⚠ Live order error for {sym}: {e}")
+
         try:
             import bot_status
             bot_status.log_activity("trade", f"OPEN {sym} {qty}sh @ ₹{entry_px:,.2f} [{macro}]",
@@ -782,6 +826,19 @@ def run(intraday_only=False):
 
     all_syms = list(set(portfolio["positions"]) | set(confirm_pf["positions"]))
     curr_prices = fetch_prices(all_syms) if all_syms else {}
+
+    # Live positions monitored on their OWN SL(-0.65%)/target(+2%) — independent
+    # of the paper portfolio's -1%/+2% rule above. Additive only; does not
+    # touch paper_portfolio.json or confirm portfolio.
+    if LIVE_TRADER:
+        try:
+            live_syms = LIVE_TRADER.get_live_symbols()
+            missing_live = [s for s in live_syms if s not in curr_prices]
+            if missing_live:
+                curr_prices.update(fetch_prices(missing_live))
+            LIVE_TRADER.check_and_exit_positions(curr_prices)
+        except Exception as e:
+            log(f"  ⚠ Live position monitor error: {e}")
 
     log("\n  Checking open positions (baseline)...")
     if not portfolio["positions"]:

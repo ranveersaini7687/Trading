@@ -1,0 +1,53 @@
+{
+  "enabled": true,
+  "live_trading_conditions": {
+    "model_b_min": 90,
+    "vol_ratio_min": 1.5
+  },
+  "live_risk": {
+    "max_live_positions_per_account": 2,
+    "alloc_per_trade": 10000,
+    "stop_loss_pct": 0.65,
+    "target_pct": 2.0
+  },
+  "accounts": [
+    {
+      "name": "Primary",
+      "account_id": 2,
+      "enabled": true,
+      "registered_ip": "140.245.238.44 (PENDING — not yet moved on Angel One's portal)",
+      "comment_ip": "This is ranveer's own account (AACJ063054). User wants this to be the real working account, but the VM's IP is currently still registered to AACG291006 below, not this one. Real orders will fail here until the IP is reassigned on Angel One's SmartAPI portal — verify with a real login+order test before trusting this account for live orders.",
+      "api_key_env": "ANGEL_API_KEY_2",
+      "client_id_env": "ANGEL_CLIENT_ID_2",
+      "password_env": "ANGEL_PASSWORD_2",
+      "totp_secret_env": "ANGEL_TOTP_SECRET_2",
+      "max_capital": 20000
+    },
+    {
+      "name": "Secondary",
+      "account_id": 1,
+      "enabled": true,
+      "registered_ip": "140.245.238.44",
+      "comment_ip": "AACG291006. Currently the ONLY account that can place real orders (has the VM's IP registered). Will likely need its IP removed/reassigned once AACJ063054 (now 'Primary' above) takes over as the main live-trading account.",
+      "api_key_env": "ANGEL_API_KEY",
+      "client_id_env": "ANGEL_CLIENT_ID",
+      "password_env": "ANGEL_PASSWORD",
+      "totp_secret_env": "ANGEL_TOTP_SECRET",
+      "max_capital": 20000
+    }
+  ],
+  "risk_controls": {
+    "daily_loss_limit_pct": 5.0,
+    "max_sector_per_account": 1,
+    "min_order_value": 1000,
+    "position_sizing": "fixed_alloc"
+  },
+  "notifications": {
+    "whatsapp_enabled": true,
+    "log_live_trades": true,
+    "log_file": "live_trading.log"
+  },
+  "dry_run": true,
+  "comment": "Set 'enabled': true and account 'enabled': true to activate live trading. Conditions: Model B >= 90 AND vol_ratio >= 1.5. Live sizing: max 2 concurrent live trades PER ACCOUNT (up to 4 total across Primary+Secondary IF both had working IPs), ₹10,000 each, SL -0.65%, Target +2% — independent of paper trading's ₹1L / -1% / +2% rules.",
+  "comment_ip_constraint": "IMPORTANT: as of 2026-07-29, only Primary's IP (140.245.238.44) is registered with Angel One. Secondary has no registered IP yet, so real orders (dry_run:false) on Secondary will be rejected with an IP-mismatch error until it gets its own separate static IP. Effective real-order cap right now is 2 (Primary only), not 4."
+}
