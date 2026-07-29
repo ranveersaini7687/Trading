@@ -6,23 +6,42 @@ Entry condition : Model B >= 90 AND vol_ratio >= 1.5
 Live sizing     : max 2 concurrent live trades per account, ₹10,000 alloc each
 Live SL/Target  : -0.65% / +2%  (independent of paper trading's -1% / +2%)
 
-Exits are enforced by Angel One's own GTT (Good-Till-Triggered) rules —
-two per position (SL-sell, target-sell), created at entry time so
-protection is active from day one, including same-day. GTT rules live
-on Angel's servers and fire even if our bot/VM is down. We still run a
-lightweight periodic reconciliation to detect which rule fired and
-cancel its untriggered sibling. If GTT rule creation fails for a
-position, we fall back to polling curr_prices and placing a manual
-SELL ourselves — so no position is ever left silently unprotected.
+Exits are designed to be enforced by Angel One's own GTT (Good-Till-
+Triggered) rules — two per position (SL-sell, target-sell), created at
+entry time so protection is active from day one, including same-day.
+GTT rules would live on Angel's servers and fire even if our bot/VM is
+down, with a lightweight periodic reconciliation to detect which rule
+fired and cancel its untriggered sibling.
+
+GTT_ENABLED = False as of 2026-07-29: Angel One's GTT createRule/
+modifyRule/cancelRule endpoints return 404 "no Route matched with those
+values" — a confirmed, currently-unresolved bug on Angel's own side
+(see their SmartAPI forum thread "GTT Orders not placing"), not
+something fixable in our code. While GTT_ENABLED is False, every
+position falls back to our own polling (check_and_exit_positions) for
+SL/target enforcement — the exact same fallback path that already
+existed for individual GTT-creation failures. Flip GTT_ENABLED back to
+True once Angel fixes the endpoint.
 
 Paper trading (paper_trader.py) is untouched — live orders are additive.
 """
 
 import json
 import os
+import time
 from datetime import datetime
 from live_accounts import get_account_manager
 from angel_api import AngelOneAPI
+
+# How long to wait for a MARKET order to actually fill before falling
+# back to the pre-trade estimated price for SL/target calculation.
+FILL_CHECK_ATTEMPTS = 5
+FILL_CHECK_DELAY_SEC = 1.5
+
+# Angel One's GTT create/modify/cancel endpoints are currently broken
+# (404 "no Route matched with those values" — confirmed bug on their
+# side, not ours). Set True once Angel fixes it.
+GTT_ENABLED = False
 
 # GTT rule status values (see angel_api.get_gtt_rule_details docstring)
 GTT_STILL_ACTIVE = {"NEW", "ACTIVE"}
@@ -76,6 +95,23 @@ class LiveTrader:
     def _account_open_count(self, account_id):
         return len(self.live_positions.get(str(account_id), {}))
 
+    def _wait_for_fill(self, angel, order_id, estimated_price):
+        """
+        Poll a just-placed MARKET order a few times for its actual fill
+        price. Market orders can execute at a different price than our
+        pre-trade estimate, especially in a fast-moving stock — SL/target
+        should be computed off the real fill, not the stale estimate.
+        Falls back to estimated_price if no fill is confirmed in time.
+        """
+        for _ in range(FILL_CHECK_ATTEMPTS):
+            status = angel.get_order_status(order_id)
+            if status.get("status") == "complete" and status.get("average_price"):
+                return round(status["average_price"], 2), True
+            time.sleep(FILL_CHECK_DELAY_SEC)
+        log(f"  ⚠ Order {order_id} not confirmed filled after {FILL_CHECK_ATTEMPTS} checks — "
+            f"using estimated price ₹{estimated_price:.2f} for SL/target")
+        return estimated_price, False
+
     def _angel_for(self, acc):
         angel = AngelOneAPI()
         angel.api_key = acc["api_key"]
@@ -128,6 +164,10 @@ class LiveTrader:
         rule's creation failed, in which case the caller should fall back
         to polling for that side.
         """
+        if not GTT_ENABLED:
+            log(f"  ⚪ GTT disabled (Angel-side outage) — {symbol} protected via polling instead")
+            return None, None
+
         sl_limit = round(sl_price * (1 - GTT_LIMIT_BUFFER_PCT / 100), 2)
         tgt_limit = round(target_price * (1 - GTT_LIMIT_BUFFER_PCT / 100), 2)
 
@@ -186,26 +226,38 @@ class LiveTrader:
 
         sl_pct = self.live_risk["stop_loss_pct"]
         tgt_pct = self.live_risk["target_pct"]
-        sl_price = round(entry_price * (1 - sl_pct / 100), 2)
-        target_price = round(entry_price * (1 + tgt_pct / 100), 2)
 
         try:
             angel = None
+            fill_price = entry_price  # pre-trade estimate; refined below once filled
+            filled_confirmed = False
+
             if self.dry_run:
-                log(f"  [DRY RUN] Would BUY {qty} {symbol} @ ₹{entry_price:.2f} "
+                sl_price = round(entry_price * (1 - sl_pct / 100), 2)
+                target_price = round(entry_price * (1 + tgt_pct / 100), 2)
+                log(f"  [DRY RUN] Would BUY {qty} {symbol} at MARKET (est. ₹{entry_price:.2f}) "
                     f"(SL ₹{sl_price:.2f} / T ₹{target_price:.2f}) on account {acc['name']}")
                 order_id = f"DRY_{symbol}_{datetime.now().timestamp()}"
             else:
                 angel = self._angel_for(acc)
 
-                result = angel.place_market_order(symbol, "BUY", qty, price=entry_price)
+                # MARKET order — qty only, no price. A LIMIT order at our
+                # pre-trade estimate can go unfilled if price has moved by
+                # the time it reaches the exchange; MARKET always executes.
+                result = angel.place_market_order(symbol, "BUY", qty)
                 if not result["status"]:
                     log(f"  ✗ Live order failed for {symbol}: {result['message']}")
                     return {"placed": False, "reason": result["message"], "order_id": None}
 
                 order_id = result["order_id"]
-                log(f"  ✓ Live BUY: {symbol} {qty}sh @ ₹{entry_price:.2f}  "
-                    f"SL ₹{sl_price:.2f}  T ₹{target_price:.2f}  [Order ID: {order_id}]")
+                log(f"  ✓ Live BUY (MARKET): {symbol} {qty}sh  [Order ID: {order_id}]  checking fill price...")
+
+                fill_price, filled_confirmed = self._wait_for_fill(angel, order_id, entry_price)
+                sl_price = round(fill_price * (1 - sl_pct / 100), 2)
+                target_price = round(fill_price * (1 + tgt_pct / 100), 2)
+                log(f"  ✓ {symbol} entry ₹{fill_price:.2f} "
+                    f"({'confirmed fill' if filled_confirmed else 'estimated — unconfirmed'})  "
+                    f"SL ₹{sl_price:.2f}  T ₹{target_price:.2f}")
 
             sl_rule_id, tgt_rule_id = self._create_exit_gtt_rules(
                 angel, acc, symbol, qty, sl_price, target_price
@@ -214,7 +266,8 @@ class LiveTrader:
             self.live_positions.setdefault(str(acc_id), {})[symbol] = {
                 "order_id": order_id,
                 "qty": qty,
-                "entry_price": entry_price,
+                "entry_price": fill_price,
+                "entry_price_confirmed": filled_confirmed,
                 "stop_loss": sl_price,
                 "target": target_price,
                 "entry_time": datetime.now().isoformat(),
@@ -229,7 +282,8 @@ class LiveTrader:
                 "action": "BUY",
                 "symbol": symbol,
                 "qty": qty,
-                "price": entry_price,
+                "price": fill_price,
+                "price_confirmed": filled_confirmed,
                 "stop_loss": sl_price,
                 "target": target_price,
                 "sl_rule_id": sl_rule_id,
@@ -261,17 +315,26 @@ class LiveTrader:
                 continue
 
             try:
+                fill_price = exit_price  # trigger-price estimate; refined below once filled
+                filled_confirmed = False
+
                 if self.dry_run:
-                    log(f"  [DRY RUN] Would SELL {qty} {symbol} @ ₹{exit_price:.2f}  [{reason}]")
+                    log(f"  [DRY RUN] Would SELL {qty} {symbol} at MARKET (est. ₹{exit_price:.2f})  [{reason}]")
                     order_id = f"DRY_SELL_{symbol}_{datetime.now().timestamp()}"
                 else:
                     angel = self._angel_for(acc)
-                    result = angel.place_market_order(symbol, "SELL", qty, price=exit_price)
+                    # MARKET order — guarantees execution even if price has
+                    # moved past the SL/target trigger by the time it's sent.
+                    result = angel.place_market_order(symbol, "SELL", qty)
                     if not result["status"]:
                         log(f"  ✗ Live sell order failed for {symbol}: {result['message']}")
                         return False
                     order_id = result["order_id"]
-                    log(f"  ✓ Live SELL: {symbol} {qty}sh @ ₹{exit_price:.2f}  [{reason}]")
+                    log(f"  ✓ Live SELL (MARKET): {symbol} {qty}sh  [{reason}]  [Order ID: {order_id}]  checking fill price...")
+
+                    fill_price, filled_confirmed = self._wait_for_fill(angel, order_id, exit_price)
+                    log(f"  ✓ {symbol} exit ₹{fill_price:.2f} "
+                        f"({'confirmed fill' if filled_confirmed else 'estimated — unconfirmed'})")
 
                 del self.live_positions[acc_id][symbol]
                 if not self.live_positions[acc_id]:
@@ -282,7 +345,8 @@ class LiveTrader:
                     "action": "SELL",
                     "symbol": symbol,
                     "qty": qty,
-                    "price": exit_price,
+                    "price": fill_price,
+                    "price_confirmed": filled_confirmed,
                     "order_id": order_id,
                     "account": acc["name"],
                     "reason": reason,
@@ -316,7 +380,7 @@ class LiveTrader:
         cancel the untriggered sibling and clear our local tracking —
         the actual sell already happened on Angel's side.
         """
-        if self.dry_run or not self.live_positions:
+        if not GTT_ENABLED or self.dry_run or not self.live_positions:
             return
 
         for acc_id, positions in list(self.live_positions.items()):
