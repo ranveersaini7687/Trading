@@ -15,8 +15,8 @@
       "name": "Primary",
       "account_id": 2,
       "enabled": true,
-      "registered_ip": "140.245.238.44 (PENDING — not yet moved on Angel One's portal)",
-      "comment_ip": "This is ranveer's own account (AACJ063054). User wants this to be the real working account, but the VM's IP is currently still registered to AACG291006 below, not this one. Real orders will fail here until the IP is reassigned on Angel One's SmartAPI portal — verify with a real login+order test before trusting this account for live orders.",
+      "registered_ip": "140.245.238.44 (user confirmed reassigned on Angel One's portal 2026-07-29, NOT yet independently verified with a real order test)",
+      "comment_ip": "This is ranveer's own account (AACJ063054), now the main real working account.",
       "api_key_env": "ANGEL_API_KEY_2",
       "client_id_env": "ANGEL_CLIENT_ID_2",
       "password_env": "ANGEL_PASSWORD_2",
@@ -47,7 +47,7 @@
     "log_live_trades": true,
     "log_file": "live_trading.log"
   },
-  "dry_run": true,
+  "dry_run": false,
   "comment": "Set 'enabled': true and account 'enabled': true to activate live trading. Conditions: Model B >= 90 AND vol_ratio >= 1.5. Live sizing: max 2 concurrent live trades PER ACCOUNT (up to 4 total across Primary+Secondary IF both had working IPs), ₹10,000 each, SL -0.65%, Target +2% — independent of paper trading's ₹1L / -1% / +2% rules.",
   "comment_ip_constraint": "IMPORTANT: as of 2026-07-29, only Primary's IP (140.245.238.44) is registered with Angel One. Secondary has no registered IP yet, so real orders (dry_run:false) on Secondary will be rejected with an IP-mismatch error until it gets its own separate static IP. Effective real-order cap right now is 2 (Primary only), not 4."
 }
