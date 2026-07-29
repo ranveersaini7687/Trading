@@ -830,11 +830,12 @@ def run(intraday_only=False):
     # Live positions monitored on their OWN SL(-0.65%)/target(+2%) — independent
     # of the paper portfolio's -1%/+2% rule above. Additive only; does not
     # touch paper_portfolio.json or confirm portfolio. Primary protection is
-    # Angel One's own GTT rules (reconciled here); check_and_exit_positions
-    # is only a fallback for positions where GTT rule creation failed.
+    # two real resting orders per position (STOPLOSS_LIMIT for SL, LIMIT
+    # for target) reconciled here; check_and_exit_positions is only a
+    # fallback for whichever side's order failed to place or died unfilled.
     if LIVE_TRADER:
         try:
-            LIVE_TRADER.reconcile_gtt_positions()
+            LIVE_TRADER.reconcile_exit_orders()
             live_syms = LIVE_TRADER.get_live_symbols()
             missing_live = [s for s in live_syms if s not in curr_prices]
             if missing_live:

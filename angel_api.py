@@ -465,6 +465,61 @@ class AngelOneAPI:
         except Exception as e:
             return {"status": False, "order_id": None, "message": str(e)}
 
+    def place_stoploss_order(self, symbol, order_type, qty, trigger_price, limit_price, producttype="DELIVERY"):
+        """
+        Place a real STOPLOSS_LIMIT order — stays dormant on the exchange
+        until price crosses trigger_price, then fires as a limit order at
+        limit_price. Unlike a plain LIMIT order, this won't execute
+        immediately even if the limit price is already marketable, since
+        it only activates once triggered. Uses variety=STOPLOSS (distinct
+        from the NORMAL variety used by place_market_order) — cancelling
+        this order later requires passing variety="STOPLOSS" too.
+
+        Note: exchanges cap how far apart trigger_price and limit_price
+        may be (a small permissible range) — keep the gap small (the
+        buffer used here is intentionally modest for this reason).
+        """
+        self.ensure_session()
+        if not self._token_map:
+            self._load_scrip_master()
+
+        token = self._token_map.get(symbol)
+        if not token:
+            return {"status": False, "order_id": None, "message": f"Symbol {symbol} not found"}
+
+        order_data = {
+            "variety": "STOPLOSS",
+            "tradingsymbol": f"{symbol}-EQ",
+            "symboltoken": token,
+            "transactiontype": order_type,
+            "exchange": "NSE",
+            "ordertype": "STOPLOSS_LIMIT",
+            "producttype": producttype,
+            "duration": "DAY",
+            "price": str(round(limit_price, 2)),
+            "triggerprice": str(round(trigger_price, 2)),
+            "squareoff": "0",
+            "stoploss": "0",
+            "quantity": str(qty),
+        }
+
+        try:
+            resp = requests.post(
+                f"{ANGEL_BASE}/rest/secure/angelbroking/order/v1/placeOrder",
+                headers=self._auth_headers(),
+                json=order_data,
+                timeout=15,
+            )
+            body = self._parse_order_response(resp)
+
+            if body.get("status"):
+                order_id = body.get("data", {}).get("orderid")
+                return {"status": True, "order_id": order_id, "message": "Stop-loss order placed successfully"}
+            else:
+                return {"status": False, "order_id": None, "message": body.get("message", "Unknown error")}
+        except Exception as e:
+            return {"status": False, "order_id": None, "message": str(e)}
+
     def get_order_status(self, order_id):
         """Look up an order's status from today's order book by orderid."""
         self.ensure_session()
